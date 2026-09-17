@@ -10,6 +10,8 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
   <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-polyfill/6.26.0/polyfill.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="app.js"></script>
   <style>
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
@@ -50,23 +52,20 @@
       three_statement: [
         ["公司信息 Company", [
           { name: "company_name", label: "公司名称 Company Name", type: "text" },
-          { name: "projection_years", label: "预测年数 Projection Years", type: "int" },
+          { name: "projection_years", label: "预测年数 Projection Years (1-10)", type: "int" },
         ]],
         ["收入与利润率 Revenue & Margins", [
           { name: "revenue_y0", label: "基期收入 Year 0 Revenue", type: "number" },
-          { name: "rev_growth_y1", label: "收入增长率 Y1", type: "percent" },
-          { name: "rev_growth_y2", label: "收入增长率 Y2", type: "percent" },
-          { name: "rev_growth_y3", label: "收入增长率 Y3", type: "percent" },
-          { name: "rev_growth_y4", label: "收入增长率 Y4", type: "percent" },
-          { name: "rev_growth_y5", label: "收入增长率 Y5", type: "percent" },
-          { name: "cogs_pct", label: "COGS % 成本率", type: "percent" },
-          { name: "sga_pct", label: "SG&A % 销管费用率", type: "percent" },
-          { name: "rd_pct", label: "R&D % 研发费用率", type: "percent" },
-          { name: "da_pct", label: "D&A % 折旧摊销率", type: "percent" },
+          { type: "percent_yearly", base: "rev_growth", label: "收入增长率 Revenue Growth" },
+          { type: "percent_toggle", name: "cogs_pct", label: "COGS % 成本率" },
+          { type: "percent_toggle", name: "sga_pct", label: "SG&A % 销管费用率" },
+          { type: "percent_toggle", name: "rd_pct", label: "R&D % 研发费用率" },
+          { type: "percent_toggle", name: "da_pct", label: "D&A % 折旧摊销率" },
           { name: "interest_rate", label: "债务利率 Interest Rate", type: "percent" },
           { name: "tax_rate", label: "税率 Tax Rate", type: "percent" },
+          { name: "tax_basis", label: "税率口径 Tax Basis", type: "tax_basis" },
           { name: "dividend_pct", label: "股利分配率 Dividend Payout", type: "percent" },
-          { name: "capex_pct", label: "CapEx % 资本支出率", type: "percent" },
+          { type: "percent_toggle", name: "capex_pct", label: "CapEx % 资本支出率" },
         ]],
         ["营运资本天数 Working Capital Days", [
           { name: "dso", label: "DSO 应收天数", type: "number" },
@@ -94,27 +93,24 @@
         ]],
         ["运营假设 Operating", [
           { name: "revenue_y0", label: "基期收入 Year 0 Revenue", type: "number" },
-          { name: "rev_growth_y1", label: "收入增长率 Y1", type: "percent" },
-          { name: "rev_growth_y2", label: "收入增长率 Y2", type: "percent" },
-          { name: "rev_growth_y3", label: "收入增长率 Y3", type: "percent" },
-          { name: "rev_growth_y4", label: "收入增长率 Y4", type: "percent" },
-          { name: "rev_growth_y5", label: "收入增长率 Y5", type: "percent" },
-          { name: "ebitda_margin_y1", label: "EBITDA 利润率 Y1", type: "percent" },
-          { name: "ebitda_margin_y2", label: "EBITDA 利润率 Y2", type: "percent" },
-          { name: "ebitda_margin_y3", label: "EBITDA 利润率 Y3", type: "percent" },
-          { name: "ebitda_margin_y4", label: "EBITDA 利润率 Y4", type: "percent" },
-          { name: "ebitda_margin_y5", label: "EBITDA 利润率 Y5", type: "percent" },
-          { name: "da_pct", label: "D&A % 折旧摊销率", type: "percent" },
-          { name: "capex_pct", label: "CapEx % 资本支出率", type: "percent" },
-          { name: "nwc_pct", label: "NWC % 净营运资本率", type: "percent" },
+          { type: "percent_yearly", base: "rev_growth", label: "收入增长率 Revenue Growth" },
+          { type: "percent_yearly", base: "ebitda_margin", label: "EBITDA 利润率 EBITDA Margin" },
+          { type: "percent_toggle", name: "da_pct", label: "D&A % 折旧摊销率" },
+          { type: "percent_toggle", name: "capex_pct", label: "CapEx % 资本支出率" },
+          { type: "percent_toggle", name: "nwc_pct", label: "NWC % 净营运资本率" },
           { name: "tax_rate", label: "税率 Tax Rate", type: "percent" },
+          { name: "tax_basis", label: "税率口径 Tax Basis", type: "tax_basis" },
         ]],
-        ["WACC 资本成本", [
+        ["WACC 资本成本 Capital Structure", [
           { name: "risk_free_rate", label: "无风险利率 Rf", type: "percent" },
           { name: "equity_risk_premium", label: "股权风险溢价 ERP", type: "percent" },
           { name: "beta", label: "Beta", type: "number" },
-          { name: "pre_tax_cost_of_debt", label: "税前债务成本 Pre-tax Kd", type: "percent" },
-          { name: "debt_weight", label: "目标债务权重 Debt Weight", type: "percent" },
+          { name: "pre_tax_cost_of_debt", label: "税前债务成本 Kd (Pre-tax)", type: "percent" },
+          { name: "debt_weight", label: "债务权重 Wd", type: "percent" },
+          { name: "cost_of_preferred", label: "优先股成本 Kp (股息率)", type: "percent" },
+          { name: "preferred_weight", label: "优先股权重 Wp", type: "percent" },
+          { type: "equity_weight_auto" },
+          { name: "preferred_stock", label: "优先股金额 Preferred Stock（同时在 EV→普通股 桥中扣除）", type: "number" },
         ]],
         ["终值 Terminal Value", [
           { name: "terminal_growth", label: "终值增长率 g", type: "percent" },
@@ -125,7 +121,6 @@
           { name: "net_debt", label: "总债务 Total Debt", type: "number" },
           { name: "cash", label: "现金 Cash", type: "number" },
           { name: "minority_interest", label: "少数股东权益 Minority", type: "number" },
-          { name: "preferred_stock", label: "优先股 Preferred", type: "number" },
           { name: "stock_based_comp", label: "股权激励 SBC", type: "number" },
           { name: "pension_deficit", label: "养老金缺口 Pension", type: "number" },
           { name: "shares_outstanding", label: "流通股本(M) Shares", type: "number" },
@@ -166,20 +161,17 @@
           { name: "min_cash_balance", label: "最低现金余额 Min Cash", type: "number" },
         ]],
         ["运营 Operating", [
-          { name: "rev_growth_y1", label: "收入增长率 Y1", type: "percent" },
-          { name: "rev_growth_y2", label: "收入增长率 Y2", type: "percent" },
-          { name: "rev_growth_y3", label: "收入增长率 Y3", type: "percent" },
-          { name: "rev_growth_y4", label: "收入增长率 Y4", type: "percent" },
-          { name: "rev_growth_y5", label: "收入增长率 Y5", type: "percent" },
-          { name: "ebitda_margin", label: "EBITDA 利润率", type: "percent" },
-          { name: "da_pct", label: "D&A % 折旧摊销率", type: "percent" },
-          { name: "capex_pct", label: "CapEx % 资本支出率", type: "percent" },
-          { name: "nwc_pct", label: "ΔNWC % 净营运资本率", type: "percent" },
+          { type: "percent_yearly", base: "rev_growth", label: "收入增长率 Revenue Growth" },
+          { type: "percent_toggle", name: "ebitda_margin", label: "EBITDA 利润率 EBITDA Margin" },
+          { type: "percent_toggle", name: "da_pct", label: "D&A % 折旧摊销率" },
+          { type: "percent_toggle", name: "capex_pct", label: "CapEx % 资本支出率" },
+          { type: "percent_toggle", name: "nwc_pct", label: "ΔNWC % 净营运资本率" },
           { name: "tax_rate", label: "税率 Tax Rate", type: "percent" },
+          { name: "tax_basis", label: "税率口径 Tax Basis", type: "tax_basis" },
         ]],
         ["退出 Exit", [
           { name: "exit_ev_ebitda", label: "退出 EV/EBITDA 倍数", type: "number" },
-          { name: "exit_year", label: "退出年 Exit Year", type: "int" },
+          { name: "exit_year", label: "退出年/预测年数 Exit Year (1-10)", type: "int" },
           { name: "cash_interest_rate", label: "现金存款利率 Cash Int Rate", type: "percent" },
         ]],
       ],
@@ -189,32 +181,91 @@
     function isPercent(field) { return field.type === "percent"; }
     function isInt(field) { return field.type === "int"; }
 
-    function defaultsToForm(defaults, groups) {
+    // 预测年数：三表/DCF 取 projection_years，LBO 取 exit_year（表单值/参数值均可）
+    function yearNOf(modelType, obj) {
+      var key = modelType === "lbo" ? "exit_year" : "projection_years";
+      var v = parseInt(obj ? obj[key] : 0, 10);
+      return Math.max(1, Math.min(10, isNaN(v) ? 5 : v));
+    }
+
+    // 判断某 percent_toggle 比率是否已按年展开（对象中存在 base_y1 即视为开启）
+    function ratioToggleOn(base, obj) {
+      return obj[base + "_y1"] !== undefined && obj[base + "_y1"] !== "";
+    }
+
+    // 从参数/表单推断单个字段组内全部 toggle 开关
+    function inferToggles(fields, obj) {
+      var t = {};
+      fields.forEach(function(f) {
+        if (f.type === "percent_toggle" && ratioToggleOn(f.name, obj)) t[f.name] = true;
+      });
+      return t;
+    }
+
+    // 始终按年的字段 base（收入增长率；DCF 还有 EBITDA 利润率）
+    function yearlyBases(modelType) {
+      return modelType === "dcf" ? ["rev_growth", "ebitda_margin"] : ["rev_growth"];
+    }
+
+    // 展开字段描述符为平铺字段：percent_yearly 展开 Y1..YN；percent_toggle 按开关展开
+    function flattenFields(fields, yearN, toggles) {
+      var out = [];
+      fields.forEach(function(f) {
+        if (f.type === "percent_yearly") {
+          for (var i = 1; i <= yearN; i++) {
+            out.push({ name: f.base + "_y" + i, label: f.label + " Y" + i, type: "percent" });
+          }
+        } else if (f.type === "percent_toggle") {
+          if (toggles[f.name]) {
+            for (var j = 1; j <= yearN; j++) {
+              out.push({ name: f.name + "_y" + j, label: f.label + " Y" + j, type: "percent" });
+            }
+          } else {
+            out.push({ name: f.name, label: f.label, type: "percent" });
+          }
+        } else {
+          out.push(f);
+        }
+      });
+      return out;
+    }
+
+    function defaultsToForm(defaults, groups, modelType) {
       var form = {};
+      var yearN = yearNOf(modelType, defaults);
       for (var gi = 0; gi < groups.length; gi++) {
         var fields = groups[gi][1];
-        for (var fi = 0; fi < fields.length; fi++) {
-          var f = fields[fi];
+        var toggles = inferToggles(fields, defaults);
+        var flat = flattenFields(fields, yearN, toggles);
+        for (var fi = 0; fi < flat.length; fi++) {
+          var f = flat[fi];
           var v = defaults[f.name];
-          if (v === undefined) v = "";
-          if (isPercent(f)) { v = (v * 100); }
+          if (v === undefined || v === null) {
+            // 年度字段缺省时沿用上一年（新增年数场景），其余给空/0
+            var m = /^(.*)_y(\d+)$/.exec(f.name);
+            if (m && parseInt(m[2], 10) > 1) v = defaults[m[1] + "_y" + (parseInt(m[2], 10) - 1)];
+            if (v === undefined) v = (f.type === "percent") ? 0 : "";
+          }
+          if (isPercent(f)) { v = (parseFloat(v) || 0) * 100; }
           form[f.name] = v;
         }
       }
       return form;
     }
 
-    function formToApi(form, groups, customItems) {
+    function formToApi(form, groups, modelType, customItems) {
       var api = {};
+      var yearN = yearNOf(modelType, form);
       for (var gi = 0; gi < groups.length; gi++) {
         var fields = groups[gi][1];
-        for (var fi = 0; fi < fields.length; fi++) {
-          var f = fields[fi];
+        var toggles = inferToggles(fields, form);
+        var flat = flattenFields(fields, yearN, toggles);
+        for (var fi = 0; fi < flat.length; fi++) {
+          var f = flat[fi];
+          if (f.type === "equity_weight_auto") continue; // 自动计算值，不提交
           var v = form[f.name];
-          if (f.type === "text") {
-            api[f.name] = v;
-          } else if (f.type === "select") {
-            api[f.name] = v;
+          if (f.type === "text" || f.type === "select" || f.type === "tax_basis") {
+            api[f.name] = (v === undefined || v === "") ? (f.type === "tax_basis" ? "mtr" : v) : v;
           } else if (isPercent(f)) {
             api[f.name] = parseFloat(v) / 100;
           } else if (isInt(f)) {
@@ -222,7 +273,7 @@
           } else {
             api[f.name] = parseFloat(v);
           }
-          if (isNaN(api[f.name]) && f.type !== "text" && f.type !== "select") {
+          if (isNaN(api[f.name]) && f.type !== "text" && f.type !== "select" && f.type !== "tax_basis") {
             api[f.name] = 0;
           }
         }
@@ -285,6 +336,32 @@
         onChange: function(e) { onChange(e.target.value); },
         className: "w-full bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-sm text-blue-300 font-mono focus:border-blue-500 focus:outline-none"
       });
+    }
+
+    // ETR / MTR 税率口径分段选择
+    function TaxBasisInput(props) {
+      var value = props.value || "mtr";
+      var onChange = props.onChange;
+      var opts = [
+        { v: "etr", label: "ETR", hint: "有效税率 Effective Tax Rate：利润表实际税负" },
+        { v: "mtr", label: "MTR", hint: "边际税率 Marginal Tax Rate：法定税率，用于 NOPAT / WACC" },
+      ];
+      return React.createElement("div", null,
+        React.createElement("div", { className: "flex rounded border border-slate-600 overflow-hidden" },
+          opts.map(function(o) {
+            var active = value === o.v;
+            return React.createElement("button", {
+              key: o.v, type: "button",
+              onClick: function() { onChange(o.v); },
+              className: "flex-1 px-2 py-1.5 text-xs font-bold transition " +
+                (active ? "bg-blue-600 text-white" : "bg-slate-700 text-slate-300 hover:bg-slate-600")
+            }, o.label);
+          })
+        ),
+        React.createElement("p", { className: "text-[10px] text-slate-500 mt-1 leading-tight" },
+          (value === "etr" ? opts[0].hint : opts[1].hint)
+        )
+      );
     }
 
     // ==================== Helpers for preview ====================
@@ -539,54 +616,66 @@
             )
           )
         );
+        var wd = data.wacc, tvBasis = wd.tax_basis === "mtr" ? "MTR 边际税率" : "ETR 有效税率";
+        var wSumOk = Math.abs(wd.weights_sum - 1) < 0.0001;
+        function waccCell(label, value, sub, hi) {
+          return React.createElement("div", { className: "bg-slate-900 rounded-lg p-3 border " + (hi ? "border-blue-500" : "border-slate-700") },
+            React.createElement("div", { className: "text-xs text-slate-400" }, label),
+            React.createElement("div", { className: "text-base font-mono " + (hi ? "text-blue-300 font-bold" : "text-slate-200") }, value),
+            sub ? React.createElement("div", { className: "text-[10px] text-slate-500 mt-0.5" }, sub) : null
+          );
+        }
         sections.push(
           React.createElement("div", { key: "wacc", className: "bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg" },
-            React.createElement("h3", { className: "text-sm font-semibold text-blue-400 mb-4 uppercase tracking-wide" }, "WACC 资本成本"),
-            React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-5 gap-3" },
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "Cost of Equity"),
-                React.createElement("div", { className: "text-sm font-mono text-slate-200" }, fmtPct(data.wacc.cost_of_equity))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "After-tax Kd"),
-                React.createElement("div", { className: "text-sm font-mono text-slate-200" }, fmtPct(data.wacc.after_tax_cost_of_debt))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "Equity Weight"),
-                React.createElement("div", { className: "text-sm font-mono text-slate-200" }, fmtPct(data.wacc.equity_weight))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "Debt Weight"),
-                React.createElement("div", { className: "text-sm font-mono text-slate-200" }, fmtPct(data.wacc.debt_weight))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "WACC"),
-                React.createElement("div", { className: "text-sm font-mono text-blue-300 font-bold" }, fmtPct(data.wacc.wacc))
+            React.createElement("h3", { className: "text-sm font-semibold text-blue-400 mb-1 uppercase tracking-wide" }, "WACC 加权平均资本成本（三层资本结构）"),
+            React.createElement("div", { className: "text-[11px] text-slate-400 mb-4" },
+              "税率口径：",
+              React.createElement("span", { className: "inline-block px-1.5 py-0.5 rounded bg-slate-700 text-slate-200 font-mono" }, wd.tax_basis ? wd.tax_basis.toUpperCase() : "ETR"),
+              "（" + tvBasis + "）；仅债务利息可抵税，普通股与优先股股利不可抵税。"),
+            React.createElement("div", { className: "text-[11px] text-slate-500 mb-1 uppercase" }, "资本成本 Cost"),
+            React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3" },
+              waccCell("Ke 普通股成本 (CAPM)", fmtPct(wd.cost_of_equity), "Rf + β × ERP"),
+              waccCell("Kd 税后债务成本", fmtPct(wd.after_tax_cost_of_debt), "税前Kd × (1−" + (wd.tax_basis || "etr").toUpperCase() + ")"),
+              waccCell("Kp 优先股成本", fmtPct(wd.cost_of_preferred), "固定股息率"),
+              waccCell("WACC", fmtPct(wd.wacc), "Ke×We + Kp×Wp + Kd(1−t)×Wd", true)
+            ),
+            React.createElement("div", { className: "text-[11px] text-slate-500 mb-1 mt-4 uppercase" }, "目标权重 Weights"),
+            React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3" },
+              waccCell("We 普通股权重（自动）", fmtPct(wd.equity_weight), "= 1 − Wd − Wp"),
+              waccCell("Wd 债务权重", fmtPct(wd.debt_weight)),
+              waccCell("Wp 优先股权重", fmtPct(wd.preferred_weight)),
+              React.createElement("div", { className: "bg-slate-900 rounded-lg p-3 border " + (wSumOk ? "border-green-600" : "border-red-500") },
+                React.createElement("div", { className: "text-xs text-slate-400" }, "权重合计（应=100%）"),
+                React.createElement("div", { className: "text-base font-mono " + (wSumOk ? "text-green-400" : "text-red-400") + " font-bold" }, fmtPct(wd.weights_sum)),
+                React.createElement("div", { className: "text-[10px] mt-0.5 " + (wSumOk ? "text-green-500" : "text-red-400") }, wSumOk ? "OK" : "请调整 Wd / Wp")
               )
             )
           )
         );
+        var tv = data.terminal_value;
+        var isGordon = tv.tv_method === "gordon";
+        function tvCell(label, value, selected) {
+          return React.createElement("div", { className: "bg-slate-900 rounded-lg p-3 border-2 " + (selected ? "border-green-500" : "border-slate-700") },
+            React.createElement("div", { className: "text-xs text-slate-400 flex items-center justify-between" },
+              label,
+              selected ? React.createElement("span", { className: "text-[9px] bg-green-500 text-slate-900 px-1 rounded font-bold" }, "选定 SELECTED") : null
+            ),
+            React.createElement("div", { className: "text-base font-mono " + (selected ? "text-green-300 font-bold" : "text-slate-200") }, value)
+          );
+        }
         sections.push(
           React.createElement("div", { key: "tv", className: "bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg" },
-            React.createElement("h3", { className: "text-sm font-semibold text-blue-400 mb-4 uppercase tracking-wide" }, "终值 Terminal Value (方法: " + data.terminal_value.tv_method + ")"),
+            React.createElement("h3", { className: "text-sm font-semibold text-blue-400 mb-4 uppercase tracking-wide" },
+              "终值 Terminal Value（当前方法：", isGordon ? "戈登增长 Gordon" : "退出倍数 Exit Multiple", "）"),
             React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 gap-3" },
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "TV (Gordon)"),
-                React.createElement("div", { className: "text-sm font-mono text-slate-200" }, fmtNum(data.terminal_value.tv_gordon))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "TV (Exit Mult.)"),
-                React.createElement("div", { className: "text-sm font-mono text-slate-200" }, fmtNum(data.terminal_value.tv_exit))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "Selected TV"),
-                React.createElement("div", { className: "text-sm font-mono text-green-300 font-bold" }, fmtNum(data.terminal_value.selected_tv))
-              ),
-              React.createElement("div", { className: "bg-slate-900 rounded-lg p-2 border border-slate-700" },
-                React.createElement("div", { className: "text-xs text-slate-400" }, "PV of TV"),
-                React.createElement("div", { className: "text-sm font-mono text-green-300 font-bold" }, fmtNum(data.terminal_value.pv_tv))
-              )
-            )
+              tvCell("TV 戈登增长法", fmtNum(tv.tv_gordon), isGordon),
+              tvCell("TV 退出倍数法", fmtNum(tv.tv_exit), !isGordon),
+              tvCell("Selected TV 选定终值", fmtNum(tv.selected_tv), true),
+              tvCell("PV of TV 终值现值", fmtNum(tv.pv_tv), false)
+            ),
+            React.createElement("p", { className: "text-[11px] leading-relaxed text-slate-400 mt-3" },
+              "两种终值始终同时计算：① 戈登增长法 = 末年FCF×(1+g)/(WACC−g)，假设预测期后永续低速增长；② 退出倍数法 = 退出年EBITDA×退出EV/EBITDA，假设到期按倍数出售。系统按你选择的终值方法二选一作为 Selected TV，再用 WACC 折现到今天得到 PV of TV。",
+              React.createElement("span", { className: "text-slate-300" }, "PV of TV 用在哪：它与预测期自由现金流现值合计 = 企业价值 EV（见上方估值卡片），是 DCF 估值的核心组成，通常占 EV 的大部分，因此对 g 与 WACC 高度敏感——可参考 Excel 中的 Sensitivity 敏感性分析表。"))
           )
         );
         sections.push(
@@ -773,6 +862,8 @@
       var loading = loadState[0]; var setLoading = loadState[1];
       var applyingState = useState("");
       var applying = applyingState[0]; var setApplying = applyingState[1];
+      var dlState = useState("");
+      var downloading = dlState[0]; var setDownloading = dlState[1];
 
       useEffect(function() {
         setList(jsListPresets());
@@ -785,7 +876,7 @@
           var params = jsGetPreset(pid, modelType);
           // 转换为表单显示值（percent ×100）
           var groups = PARAM_GROUPS[modelType];
-          var formVals = defaultsToForm(params, groups);
+          var formVals = defaultsToForm(params, groups, modelType);
           onApply(formVals);
           setApplying("");
         } catch(e) {
@@ -794,26 +885,64 @@
         }
       }
 
+      function downloadPreset(pid) {
+        setDownloading(pid);
+        Promise.resolve().then(function() {
+          return jsBuildExcel(modelType, jsGetPreset(pid, modelType));
+        }).then(function(blob) {
+          var url = URL.createObjectURL(blob);
+          var a = document.createElement("a");
+          a.href = url;
+          a.download = modelType === "three_statement" ? "Three_Statement_Model.xlsx" :
+                       modelType === "dcf" ? "DCF_Model.xlsx" : "LBO_Model.xlsx";
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          URL.revokeObjectURL(url);
+          setDownloading("");
+        }).catch(function(e) {
+          setDownloading("");
+          alert("下载 DEMO 模板失败: " + e.message);
+        });
+      }
+
       if (loading || !list || list.length === 0) return null;
 
       return React.createElement("div", { className: "bg-slate-800 border border-slate-700 rounded-xl p-4 shadow-lg" },
-        React.createElement("div", { className: "flex items-center justify-between mb-3" },
-          React.createElement("h3", { className: "text-sm font-semibold text-blue-400 uppercase tracking-wide" }, "行业预设 Industry Presets"),
-          React.createElement("span", { className: "text-xs text-slate-500" }, "一键加载预设参数")
+        React.createElement("div", { className: "flex flex-wrap items-center justify-between gap-2 mb-2" },
+          React.createElement("h3", { className: "text-sm font-semibold text-blue-400 uppercase tracking-wide flex items-center gap-2 flex-wrap" },
+            "行业预设 Industry Presets",
+            React.createElement("span", { className: "px-1.5 py-0.5 rounded bg-amber-500 text-slate-900 text-[10px] font-bold tracking-normal" }, "DEMO")
+          ),
+          React.createElement("span", { className: "text-xs text-slate-500 shrink-0" }, "一键加载 / 下载 Excel 模板")
         ),
+        React.createElement("p", { className: "text-[11px] leading-relaxed text-amber-200/80 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2 mb-3" },
+          "以下均为行业示例假设（近似量级的模拟数据，非任何真实公司数据），仅供参考演示。可一键加载到表单后修改；也可直接下载 DEMO Excel 模板，在 Excel 中修改黄色输入格后作为自己的工作底稿。"),
         React.createElement("div", { className: "flex flex-wrap gap-2" },
           list.map(function(p) {
             var isApplying = applying === p.id;
-            return React.createElement("button", {
+            var isDownloading = downloading === p.id;
+            return React.createElement("div", {
               key: p.id,
-              onClick: function() { applyPreset(p.id); },
-              disabled: !!applying,
-              title: p.description,
-              className: "px-3 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed border border-slate-600 hover:border-blue-500 rounded-lg text-xs text-slate-200 transition flex items-center gap-2"
+              className: "flex items-stretch rounded-lg overflow-hidden border border-slate-600 hover:border-blue-500 transition"
             },
-              React.createElement("span", null, p.icon),
-              React.createElement("span", null, p.name),
-              isApplying ? React.createElement("span", { className: "text-slate-400 animate-pulse" }, "...") : null
+              React.createElement("button", {
+                onClick: function() { applyPreset(p.id); },
+                disabled: !!applying || !!downloading,
+                title: p.description,
+                className: "px-3 py-2 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed text-xs text-slate-200 transition flex items-center gap-2"
+              },
+                React.createElement("span", null, p.icon),
+                React.createElement("span", null, p.name),
+                React.createElement("span", { className: "px-1 rounded bg-amber-500/90 text-slate-900 text-[9px] font-bold" }, "DEMO"),
+                isApplying ? React.createElement("span", { className: "text-slate-400 animate-pulse" }, "...") : null
+              ),
+              React.createElement("button", {
+                onClick: function() { downloadPreset(p.id); },
+                disabled: !!applying || !!downloading,
+                title: "下载该行业的 DEMO Excel 模板（黄色格可编辑）",
+                className: "px-2.5 py-2 bg-slate-800 hover:bg-blue-900 disabled:opacity-50 disabled:cursor-not-allowed text-xs text-blue-300 border-l border-slate-600 transition whitespace-nowrap"
+              }, isDownloading ? "..." : "⬇ Excel")
             );
           })
         )
@@ -849,7 +978,7 @@
             setResult(data);
             // 转换 matched 值为表单显示格式（percent ×100）
             var groups = PARAM_GROUPS[modelType];
-            var formVals = defaultsToForm(data.matched, groups);
+            var formVals = defaultsToForm(data.matched, groups, modelType);
             onApply(formVals);
             setUploading(false);
           })
@@ -877,6 +1006,8 @@
           React.createElement("h3", { className: "text-sm font-semibold text-blue-400 uppercase tracking-wide" }, "上传财报 Upload Report"),
           React.createElement("span", { className: "text-xs text-slate-500" }, "CSV / Excel 自动解析")
         ),
+        React.createElement("p", { className: "text-[11px] leading-relaxed text-amber-200/80 bg-amber-900/20 border border-amber-800/40 rounded-lg px-3 py-2 mb-3" },
+          "说明：Excel 模板上传回填功能有待更新，当前请使用上方行业预设 DEMO 或在表单中手动填写。"),
         React.createElement("label", {
           onDragOver: function(e) { e.preventDefault(); setDragging(true); },
           onDragLeave: function() { setDragging(false); },
@@ -916,21 +1047,47 @@
       var customItems = props.customItems || [];
       var onBack = props.onBack;
 
-      // 创建三套场景参数（基于当前表单，保守/基准/乐观）
+      // 创建三套场景参数（基于当前表单，保守/基准/乐观）；随预测年数动态生成 Y1..Yn
       function makeScenario(base, type) {
         var s = Object.assign({}, base);
-        var growthKeys = ["rev_growth_y1","rev_growth_y2","rev_growth_y3","rev_growth_y4","rev_growth_y5"];
-        var costKeys = ["cogs_pct","sga_pct","rd_pct","da_pct","capex_pct"];
-        var marginKeys = ["ebitda_margin","ebitda_margin_y1","ebitda_margin_y2","ebitda_margin_y3","ebitda_margin_y4","ebitda_margin_y5"];
-        if (type === "conservative") {
-          growthKeys.forEach(function(k) { if (s[k] !== undefined && s[k] !== "") { s[k] = parseFloat(s[k]) - 5; } });
-          costKeys.forEach(function(k) { if (s[k] !== undefined && s[k] !== "") { s[k] = parseFloat(s[k]) + 3; } });
-          marginKeys.forEach(function(k) { if (s[k] !== undefined && s[k] !== "") { s[k] = parseFloat(s[k]) - 3; } });
-        } else if (type === "optimistic") {
-          growthKeys.forEach(function(k) { if (s[k] !== undefined && s[k] !== "") { s[k] = parseFloat(s[k]) + 5; } });
-          costKeys.forEach(function(k) { if (s[k] !== undefined && s[k] !== "") { s[k] = parseFloat(s[k]) - 3; } });
-          marginKeys.forEach(function(k) { if (s[k] !== undefined && s[k] !== "") { s[k] = parseFloat(s[k]) + 3; } });
+        var n = yearNOf(modelType, base);
+        var growthKeys = [];
+        for (var gy = 1; gy <= n; gy++) growthKeys.push("rev_growth_y" + gy);
+        // EBITDA 利润率：DCF 始终按年；LBO 统一值 + 可能的按年细化；三表无此项
+        var marginKeys = [];
+        if (modelType === "dcf") {
+          for (var my = 1; my <= n; my++) marginKeys.push("ebitda_margin_y" + my);
+        } else if (modelType === "lbo") {
+          marginKeys.push("ebitda_margin");
+          for (var my2 = 1; my2 <= n; my2++) marginKeys.push("ebitda_margin_y" + my2);
         }
+        // 成本/费用率：统一值始终调整；若已按年细化（存在 _y1 键）则各年一并调整
+        var costBases = modelType === "three_statement"
+          ? ["cogs_pct", "sga_pct", "rd_pct", "da_pct", "capex_pct"]
+          : ["da_pct", "capex_pct", "nwc_pct"];
+        var costKeys = [];
+        costBases.forEach(function(b) {
+          costKeys.push(b);
+          for (var cy = 1; cy <= n; cy++) {
+            var k = b + "_y" + cy;
+            if (s[k] !== undefined && s[k] !== "") costKeys.push(k);
+          }
+        });
+        var gAdj = type === "conservative" ? -5 : (type === "optimistic" ? 5 : 0);
+        var cAdj = type === "conservative" ? 3 : (type === "optimistic" ? -3 : 0);
+        var mAdj = -cAdj;
+        function adj(keys, delta) {
+          if (!delta) return;
+          keys.forEach(function(k) {
+            if (s[k] !== undefined && s[k] !== "") {
+              var v = parseFloat(s[k]);
+              if (!isNaN(v)) s[k] = v + delta;
+            }
+          });
+        }
+        adj(growthKeys, gAdj);
+        adj(costKeys, cAdj);
+        adj(marginKeys, mAdj);
         return s;
       }
 
@@ -971,7 +1128,7 @@
         setLoading(true);
         setErr("");
         setResults(null);
-        var paramsList = forms.map(function(f) { return formToApi(f, groups, customItems); });
+        var paramsList = forms.map(function(f) { return formToApi(f, groups, modelType, customItems); });
         try {
           var datas = paramsList.map(function(params) {
             return jsCalculate(modelType, params);
@@ -1067,12 +1224,23 @@
           React.createElement("div", { className: "space-y-4" },
             groups.map(function(group, gi) {
               var gname = group[0];
-              var fields = group[1];
+              var rawFields = group[1];
+              var fields = flattenFields(rawFields, yearNOf(modelType, currentForm), inferToggles(rawFields, currentForm));
               return React.createElement("div", { key: gi },
                 React.createElement("div", { className: "text-xs text-slate-500 mb-2 font-semibold" }, gname),
                 React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-3" },
                   fields.map(function(f, fi) {
-                    return React.createElement("div", { key: f.name },
+                    if (f.type === "equity_weight_auto") return null;
+                    if (f.type === "tax_basis") {
+                      return React.createElement("div", { key: fi },
+                        React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, f.label),
+                        React.createElement(TaxBasisInput, {
+                          value: currentForm[f.name] || "mtr",
+                          onChange: function(v) { updateField(f.name, v); }
+                        })
+                      );
+                    }
+                    return React.createElement("div", { key: fi },
                       React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, f.label),
                       React.createElement(FieldInput, {
                         field: f,
@@ -1157,11 +1325,30 @@
     };
     var CUSTOM_WHITELIST_FUNCS = ["MAX", "MIN", "ABS", "ROUND", "SUM"];
 
+    var CUSTOM_EXAMPLES = {
+      three_statement: [
+        { name: "研发费用率 R&D Ratio", formula: "rd/revenue", format: "percent" },
+        { name: "折旧摊销 D&A（EBITDA−EBIT）", formula: "ebitda - ebit", format: "number" },
+        { name: "净利率 Net Margin", formula: "net_income/revenue", format: "percent" }
+      ],
+      dcf: [
+        { name: "UFCF 率 FCF Margin", formula: "ufcf/revenue", format: "percent" },
+        { name: "终值占企业价值比重 TV/EV", formula: "pv_tv/enterprise_value", format: "percent" },
+        { name: "EBITDA 利润率", formula: "ebitda/revenue", format: "percent" }
+      ],
+      lbo: [
+        { name: "利息保障倍数 EBITDA/利息", formula: "ebitda/total_interest", format: "number" },
+        { name: "CFADS 占收入比", formula: "cfads/revenue", format: "percent" },
+        { name: "净利率 Net Margin", formula: "net_income/revenue", format: "percent" }
+      ]
+    };
+
     function CustomItemManager(props) {
       var items = props.items || [];
       var onChange = props.onChange;
       var modelType = props.modelType;
       var hints = CUSTOM_VAR_HINTS[modelType] || [];
+      var examples = CUSTOM_EXAMPLES[modelType] || [];
 
       function update(i, field, val) {
         var next = items.slice();
@@ -1173,11 +1360,12 @@
         next.splice(i, 1);
         onChange(next);
       }
-      function add() {
+      function pushItem(tpl) {
         var next = items.slice();
-        next.push({ name: "自定义行项 " + (items.length + 1), formula: "ebitda - ebit", format: "number" });
+        next.push({ name: tpl.name || ("自定义行项 " + (items.length + 1)), formula: tpl.formula || "ebitda - ebit", format: tpl.format || "number" });
         onChange(next);
       }
+      function add() { pushItem({ name: "自定义行项 " + (items.length + 1), formula: "ebitda - ebit", format: "number" }); }
 
       // 简单语法预检: 检测括号配对、是否包含 ' " . ; 等危险字符
       function quickCheck(formula) {
@@ -1193,29 +1381,69 @@
         return { ok: true, msg: "" };
       }
 
+      // 用当前表单值实时试算自定义行（取最后一个预测年结果）
+      var previewRows = null;
+      try {
+        if (props.formData && props.groups && items.length) {
+          var previewParams = formToApi(props.formData, props.groups, modelType, items);
+          var previewData = jsCalculate(modelType, previewParams);
+          previewRows = previewData.custom_items || [];
+        }
+      } catch (e) { previewRows = null; }
+
+      function fmtPreview(item, v) {
+        if (v === null || v === undefined || (typeof v === "number" && !isFinite(v))) return "—";
+        if (item.format === "percent") return fmtPct(v);
+        return fmtNum(v);
+      }
+
       return React.createElement("div", { className: "bg-slate-800 border border-slate-700 rounded-xl p-5 shadow-lg" },
-        React.createElement("div", { className: "flex items-center justify-between mb-4" },
+        React.createElement("div", { className: "flex items-center justify-between mb-3" },
           React.createElement("div", null,
             React.createElement("h3", { className: "text-sm font-semibold text-blue-400 uppercase tracking-wide" }, "自定义行项 Custom Line Items"),
-            React.createElement("p", { className: "text-xs text-slate-500 mt-1" }, "添加个性化公式行，将出现在 Excel 与预览中。可用运算符 + - * / ^ 与函数 " + CUSTOM_WHITELIST_FUNCS.join(", "))
+            React.createElement("p", { className: "text-xs text-slate-500 mt-1" }, "添加个性化公式行，将出现在预览面板与 Excel 模型中（三表在利润表、DCF 在 Operating Model、LBO 在利润表）。")
           ),
           React.createElement("button", {
             onClick: add,
             className: "px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded-lg text-xs font-semibold text-white transition"
           }, "+ 添加 Add")
         ),
-        // Variable hints
-        hints.length > 0 ? React.createElement("div", { className: "mb-3 text-xs text-slate-500" },
-          React.createElement("span", { className: "text-slate-400" }, "可用变量: "),
-          hints.map(function(v, i) {
-            return React.createElement("span", { key: i, className: "inline-block bg-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 text-slate-300 font-mono" }, v);
+        // 用法说明
+        React.createElement("div", { className: "bg-slate-900/60 border border-slate-700 rounded-lg p-3 mb-3 text-[11px] leading-relaxed text-slate-400" },
+          React.createElement("div", { className: "text-slate-300 font-semibold mb-1" }, "怎么用 How it works"),
+          React.createElement("div", null, "① 公式用下方「可用变量」+ 运算符 ", React.createElement("span", { className: "font-mono text-blue-300" }, "+ − * / ^"), " 与函数 ", React.createElement("span", { className: "font-mono text-blue-300" }, CUSTOM_WHITELIST_FUNCS.join(", ")), "（如 ", React.createElement("span", { className: "font-mono" }, "ebitda - ebit"), "、", React.createElement("span", { className: "font-mono" }, "rd/revenue"), "）。"),
+          React.createElement("div", { className: "mt-1" }, "② 「数字 / 百分比」只控制", React.createElement("span", { className: "text-slate-200" }, "显示格式，不参与计算"), "：比率类公式（两数相除，如 net_income/revenue）请选「百分比」——底层是小数 0.05，会显示为 ", React.createElement("span", { className: "text-green-300 font-mono" }, "5.0%"), "；金额类（如 ebitda−ebit）选「数字」，显示为金额。"),
+          React.createElement("div", { className: "mt-1" }, "③ 每行下方会按当前表单参数实时显示", React.createElement("span", { className: "text-slate-200" }, "最后一个预测年"), "的试算结果；生成 Excel 后该行成为带公式的真实单元格，修改黄色输入格会自动重算。")
+        ),
+        // 可点示例
+        examples.length > 0 ? React.createElement("div", { className: "mb-3" },
+          React.createElement("span", { className: "text-xs text-slate-500 mr-2" }, "点我添加示例 Try:"),
+          examples.map(function(ex, i) {
+            return React.createElement("button", {
+              key: i,
+              onClick: function() { pushItem(ex); },
+              title: ex.formula + "（" + (ex.format === "percent" ? "百分比" : "数字") + "）",
+              className: "mr-2 mb-1 px-2 py-1 bg-slate-700 hover:bg-blue-900 border border-slate-600 hover:border-blue-500 rounded text-[11px] text-slate-200 transition"
+            }, ex.name, React.createElement("span", { className: "text-slate-500 font-mono ml-1" }, "· " + ex.formula));
           })
         ) : null,
+        // Variable hints
+        hints.length > 0 ? React.createElement("details", { className: "mb-3 text-xs text-slate-500" },
+          React.createElement("summary", { className: "cursor-pointer text-slate-400 select-none mb-1" }, "可用变量 " + hints.length + " 个（点击展开）"),
+          React.createElement("div", null,
+            hints.map(function(v, i) {
+              return React.createElement("span", { key: i, className: "inline-block bg-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 text-slate-300 font-mono" }, v);
+            })
+          )
+        ) : null,
         // Items list
-        items.length === 0 ? React.createElement("div", { className: "text-sm text-slate-500 italic py-3" }, "暂无自定义行项。点击\"添加\"按钮新增。") :
+        items.length === 0 ? React.createElement("div", { className: "text-sm text-slate-500 italic py-3" }, "暂无自定义行项。点击\"添加\"或上方示例开始。") :
         React.createElement("div", { className: "space-y-2" },
           items.map(function(item, i) {
             var check = quickCheck(item.formula || "");
+            var pv = previewRows && previewRows[i];
+            var lastVal = pv && pv.values ? pv.values[pv.values.length - 1] : undefined;
+            var lastYear = pv && pv.values ? pv.values.length - 1 : null;
             return React.createElement("div", { key: i, className: "bg-slate-900 rounded-lg p-3 border border-slate-700" },
               React.createElement("div", { className: "flex flex-col md:flex-row gap-2 items-start md:items-center" },
                 React.createElement("input", {
@@ -1236,6 +1464,7 @@
                 React.createElement("select", {
                   value: item.format,
                   onChange: function(e) { update(i, "format", e.target.value); },
+                  title: "只控制显示：比率选百分比（0.05→5.0%），金额选数字",
                   className: "bg-slate-700 border border-slate-600 rounded px-2 py-1.5 text-xs text-slate-200 focus:border-blue-500 focus:outline-none"
                 },
                   React.createElement("option", { value: "number" }, "数字"),
@@ -1246,7 +1475,14 @@
                   className: "px-2 py-1.5 bg-red-600 hover:bg-red-500 rounded text-xs text-white font-semibold"
                 }, "✕")
               ),
-              !check.ok ? React.createElement("div", { className: "text-xs text-red-400 mt-1.5" }, "⚠ " + check.msg) : null
+              !check.ok ? React.createElement("div", { className: "text-xs text-red-400 mt-1.5" }, "⚠ " + check.msg) :
+                React.createElement("div", { className: "text-[11px] mt-1.5 flex items-center gap-2" },
+                  React.createElement("span", { className: "text-slate-500" }, lastYear !== null ? "末年 (Y" + lastYear + ") 实时结果:" : "实时结果:"),
+                  pv && pv.error
+                    ? React.createElement("span", { className: "text-red-400 font-mono" }, "公式错误")
+                    : React.createElement("span", { className: "text-green-300 font-mono font-semibold" }, fmtPreview(item, lastVal)),
+                  React.createElement("span", { className: "text-slate-600" }, item.format === "percent" ? "（百分比显示：底层为小数）" : "（数字显示）")
+                )
             );
           })
         )
@@ -1262,6 +1498,7 @@
       var error = useState("");
       var viewState = useState("form");
       var customItemsState = useState([]);
+      var toggleState = useState({});
 
       var formData = formState[0];
       var setFormData = formState[1];
@@ -1275,11 +1512,14 @@
       var setView = viewState[1];
       var customItems = customItemsState[0];
       var setCustomItems = customItemsState[1];
+      var ratioToggles = toggleState[0];
+      var setRatioToggles = toggleState[1];
 
       useEffect(function() {
         try {
           var data = jsDefaults[modelType];
-          setFormData(defaultsToForm(data, groups));
+          setFormData(defaultsToForm(data, groups, modelType));
+          setRatioToggles({});
           setLoading(false);
         } catch(e) {
           setErr("加载默认参数失败: " + e.message);
@@ -1287,19 +1527,65 @@
         }
       }, []);
 
+      // 年数变化时为新增年度字段预填（沿用上一年值），保证字段与年数联动
+      function expandYearFields(next, oldN, newN) {
+        if (newN <= oldN) return;
+        var bases = yearlyBases(modelType).slice();
+        Object.keys(ratioToggles).forEach(function(b) { if (ratioToggles[b]) bases.push(b); });
+        bases.forEach(function(base) {
+          for (var i = oldN + 1; i <= newN; i++) {
+            var k = base + "_y" + i;
+            if (next[k] === undefined || next[k] === "") {
+              var prevK = base + "_y" + (i - 1);
+              next[k] = (next[prevK] !== undefined && next[prevK] !== "") ? next[prevK]
+                       : (next[base] !== undefined && next[base] !== "" ? next[base] : 4);
+            }
+          }
+        });
+      }
+
       function updateField(name, val) {
         var next = Object.assign({}, formData);
         next[name] = val;
+        // 预测年数/退出年变化：联动新增年度输入
+        if (name === "projection_years" || name === "exit_year") {
+          var oldN = yearNOf(modelType, formData);
+          var newN = Math.max(1, Math.min(10, parseInt(val, 10) || oldN));
+          expandYearFields(next, oldN, newN);
+        }
+        setFormData(next);
+      }
+
+      // 比率“按年细化”开关
+      function toggleRatio(base, on) {
+        var yearN = yearNOf(modelType, formData);
+        var next = Object.assign({}, formData);
+        var nt = Object.assign({}, ratioToggles);
+        if (on) {
+          nt[base] = true;
+          var uv = (next[base] !== undefined && next[base] !== "") ? next[base] : 0;
+          for (var i = 1; i <= yearN; i++) {
+            var k = base + "_y" + i;
+            if (next[k] === undefined || next[k] === "") next[k] = (i === 1 ? uv : (next[base + "_y" + (i-1)] !== undefined ? next[base + "_y" + (i-1)] : uv));
+          }
+        } else {
+          delete nt[base];
+          for (var j = 1; j <= 10; j++) delete next[base + "_y" + j];
+        }
+        setRatioToggles(nt);
         setFormData(next);
       }
 
       function applyPreset(formVals) {
+        setRatioToggles(inferToggles(groups.reduce(function(acc, g) { return acc.concat(g[1]); }, []), formVals));
         setFormData(formVals);
       }
 
       function applyUpload(formVals) {
         // 合并上传解析的字段到当前表单（保留未匹配字段的现有值）
         var next = Object.assign({}, formData, formVals);
+        var allFields = groups.reduce(function(acc, g) { return acc.concat(g[1]); }, []);
+        setRatioToggles(inferToggles(allFields, next));
         setFormData(next);
       }
 
@@ -1319,18 +1605,27 @@
         setGenerating(true);
         setErr("");
         try {
-          var params = formToApi(formData, groups, customItems);
-          var blob = jsBuildExcel(modelType, params);
-          var url = URL.createObjectURL(blob);
-          var a = document.createElement("a");
-          a.href = url;
-          a.download = modelType === "three_statement" ? "Three_Statement_Model.xlsx" :
-                       modelType === "dcf" ? "DCF_Model.xlsx" : "LBO_Model.xlsx";
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          setGenerating(false);
+          var params = formToApi(formData, groups, modelType, customItems);
+          if (modelType === "dcf" && waccInvalid(params)) {
+            setErr("WACC 权重错误：债务权重 Wd + 优先股权重 Wp 不能超过 100%");
+            setGenerating(false);
+            return;
+          }
+          Promise.resolve(jsBuildExcel(modelType, params)).then(function(blob) {
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = modelType === "three_statement" ? "Three_Statement_Model.xlsx" :
+                         modelType === "dcf" ? "DCF_Model.xlsx" : "LBO_Model.xlsx";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            setGenerating(false);
+          }).catch(function(e) {
+            setErr("生成失败: " + e.message);
+            setGenerating(false);
+          });
         } catch(e) {
             setErr("生成失败: " + e.message);
             setGenerating(false);
@@ -1345,7 +1640,7 @@
 
       // 预览模式: 渲染 PreviewPanel
       if (view === "preview") {
-        var params = formToApi(formData, groups, customItems);
+        var params = formToApi(formData, groups, modelType, customItems);
         return React.createElement(PreviewPanel, {
           modelType: modelType,
           params: params,
@@ -1364,6 +1659,108 @@
       }
 
       var m = MODELS[modelType];
+      var yearN = yearNOf(modelType, formData);
+
+      // DCF WACC 实时权重与校验
+      var wdPct = parseFloat(formData.debt_weight); if (isNaN(wdPct)) wdPct = 0;
+      var wpPct = parseFloat(formData.preferred_weight); if (isNaN(wpPct)) wpPct = 0;
+      var wePct = 100 - wdPct - wpPct;
+      var wInvalid = modelType === "dcf" && wePct < -0.001;
+
+      // 渲染单个字段描述符（动态类型展开为一个或多个 grid 单元）
+      function renderField(f, fi) {
+        if (f.type === "percent_yearly") {
+          var cells = [];
+          for (var yi = 1; yi <= yearN; yi++) {
+            (function(base, idx) {
+              var name = base + "_y" + idx;
+              cells.push(React.createElement("div", { key: "py-" + base + "-" + idx },
+                React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, f.label + " Y" + idx),
+                React.createElement(FieldInput, {
+                  field: { type: "percent" },
+                  value: formData[name] !== undefined ? formData[name] : "",
+                  onChange: function(v) { updateField(name, v); }
+                }),
+                React.createElement("span", { className: "text-xs text-slate-500 ml-1" }, "%")
+              ));
+            })(f.base, yi);
+          }
+          return cells;
+        }
+
+        if (f.type === "percent_toggle") {
+          var on = !!ratioToggles[f.name];
+          var inner = [];
+          if (on) {
+            for (var yj = 1; yj <= yearN; yj++) {
+              (function(base, idx) {
+                var k = base + "_y" + idx;
+                inner.push(React.createElement("div", { key: k },
+                  React.createElement("label", { className: "block text-[11px] text-slate-400 mb-1" }, "Y" + idx),
+                  React.createElement(FieldInput, {
+                    field: { type: "percent" },
+                    value: formData[k] !== undefined ? formData[k] : "",
+                    onChange: function(v) { updateField(k, v); }
+                  }),
+                  React.createElement("span", { className: "text-xs text-slate-500 ml-1" }, "%")
+                ));
+              })(f.name, yj);
+            }
+          } else {
+            inner.push(React.createElement("div", { key: f.name, className: "w-40" },
+              React.createElement(FieldInput, {
+                field: { type: "percent" },
+                value: formData[f.name] !== undefined ? formData[f.name] : "",
+                onChange: function(v) { updateField(f.name, v); }
+              })
+            ));
+          }
+          return React.createElement("div", { key: "tg-" + f.name, className: "col-span-full border-t border-slate-700/60 pt-2 mt-1" },
+            React.createElement("div", { className: "flex items-center justify-between mb-2" },
+              React.createElement("label", { className: "block text-xs text-slate-300 font-medium" }, f.label),
+              React.createElement("label", { className: "flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer select-none" },
+                React.createElement("input", {
+                  type: "checkbox", checked: on, className: "accent-blue-500 w-3.5 h-3.5",
+                  onChange: function(e) { toggleRatio(f.name, e.target.checked); }
+                }),
+                "按年细化 Per-year（默认各年相同）"
+              )
+            ),
+            React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-x-4 gap-y-2" }, inner)
+          );
+        }
+
+        if (f.type === "tax_basis") {
+          return React.createElement("div", { key: "tb", className: "col-span-2" },
+            React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, f.label),
+            React.createElement(TaxBasisInput, {
+              value: formData.tax_basis || "mtr",
+              onChange: function(v) { updateField("tax_basis", v); }
+            })
+          );
+        }
+
+        if (f.type === "equity_weight_auto") {
+          return React.createElement("div", { key: "we-auto" },
+            React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, "普通股权重 We（自动 = 100% − Wd − Wp）"),
+            React.createElement("input", {
+              type: "text", readOnly: true, value: wePct.toFixed(1) + " %",
+              className: "w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-sm font-mono " + (wInvalid ? "text-red-400" : "text-emerald-300")
+            })
+          );
+        }
+
+        return React.createElement("div", { key: f.name },
+          React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, f.label),
+          React.createElement(FieldInput, {
+            field: f,
+            value: formData[f.name] !== undefined ? formData[f.name] : "",
+            onChange: function(v) { updateField(f.name, v); }
+          }),
+          isPercent(f) ? React.createElement("span", { className: "text-xs text-slate-500 ml-1" }, "%") : null
+        );
+      }
+
       return React.createElement("div", { className: "max-w-5xl mx-auto px-4 py-6" },
         // Header
         React.createElement("div", { className: "flex items-center justify-between mb-6" },
@@ -1386,6 +1783,9 @@
           React.createElement(PresetSelector, { modelType: modelType, onApply: applyPreset }),
           React.createElement(FileUpload, { modelType: modelType, onApply: applyUpload })
         ),
+        // WACC 权重非法内联提示
+        wInvalid ? React.createElement("div", { className: "bg-red-900/60 border border-red-600 text-red-200 px-4 py-2 rounded mb-3 text-sm mt-4" },
+          "⚠ WACC 权重错误：债务权重 Wd(" + wdPct.toFixed(1) + "%) + 优先股权重 Wp(" + wpPct.toFixed(1) + "%) 超过 100%，请调整后再预览或生成。") : null,
         // Form groups
         React.createElement("div", { className: "space-y-6 mt-4" },
           groups.map(function(group, gi) {
@@ -1397,17 +1797,7 @@
             },
               React.createElement("h3", { className: "text-sm font-semibold text-blue-400 mb-4 uppercase tracking-wide" }, gname),
               React.createElement("div", { className: "grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-3" },
-                fields.map(function(f, fi) {
-                  return React.createElement("div", { key: f.name },
-                    React.createElement("label", { className: "block text-xs text-slate-400 mb-1" }, f.label),
-                    React.createElement(FieldInput, {
-                      field: f,
-                      value: formData[f.name] !== undefined ? formData[f.name] : "",
-                      onChange: function(v) { updateField(f.name, v); }
-                    }),
-                    isPercent(f) ? React.createElement("span", { className: "text-xs text-slate-500 ml-1" }, "%") : null
-                  );
-                })
+                fields.map(function(f, fi) { return renderField(f, fi); })
               )
             );
           })
@@ -1417,7 +1807,9 @@
           React.createElement(CustomItemManager, {
             items: customItems,
             onChange: setCustomItems,
-            modelType: modelType
+            modelType: modelType,
+            formData: formData,
+            groups: groups
           })
         ),
         // Action bar: Preview + Compare + Generate
@@ -1425,7 +1817,8 @@
           React.createElement("div", { className: "flex flex-col sm:flex-row gap-3" },
             React.createElement("button", {
               onClick: preview,
-              className: "flex-1 sm:flex-none px-6 py-3 bg-emerald-600 hover:bg-emerald-500 rounded-lg font-semibold text-white shadow-lg transition"
+              disabled: wInvalid,
+              className: "flex-1 sm:flex-none px-6 py-3 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg font-semibold text-white shadow-lg transition"
             }, "📊 预览 Preview"),
             React.createElement("button", {
               onClick: compare,
@@ -1433,7 +1826,7 @@
             }, "🔄 场景对比 Compare"),
             React.createElement("button", {
               onClick: generate,
-              disabled: isGenerating,
+              disabled: isGenerating || wInvalid,
               className: "flex-1 px-8 py-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg font-semibold text-white shadow-lg transition"
             }, isGenerating ? "生成中 Generating..." : "⬇ 生成 Excel Generate")
           )

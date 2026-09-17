@@ -45,6 +45,64 @@ function aoaToSheet(aoa) {
 }
 
 
+// ==================== 1b. 参数归一化与年度取值 helper ====================
+
+function _num(v, d) { var n = parseFloat(v); return isNaN(n) ? (d === undefined ? 0 : d) : n; }
+
+// 合并默认值，保证新增字段始终存在；年数限制 1~10
+function normalizeParams(modelType, p) {
+  var base = jsDefaults[modelType] || {};
+  var m = Object.assign({}, base, p || {});
+  if (modelType === "lbo") {
+    m.exit_year = Math.max(1, Math.min(10, parseInt(m.exit_year, 10) || 5));
+  } else {
+    m.projection_years = Math.max(1, Math.min(10, parseInt(m.projection_years, 10) || 5));
+  }
+  // 税率口径：仅接受 etr / mtr，未提供时沿用模型默认
+  if (m.tax_basis !== "etr" && m.tax_basis !== "mtr") m.tax_basis = base.tax_basis || "etr";
+  if (modelType === "dcf") {
+    m.debt_weight = _num(m.debt_weight, base.debt_weight);
+    m.preferred_weight = _num(m.preferred_weight, base.preferred_weight);
+    m.cost_of_preferred = _num(m.cost_of_preferred, base.cost_of_preferred);
+  }
+  return m;
+}
+
+// 年度收入增长率 rev_growth_y{i}；未填返回 0
+function growthYear(p, i) {
+  var v = parseFloat(p["rev_growth_y" + i]);
+  return isNaN(v) ? 0 : v;
+}
+
+// 年度比率：优先 <baseKey>_y<i>（按年细化值），否则用统一值 baseKey，再否则 0
+function rateYear(p, baseKey, i) {
+  var yv = parseFloat(p[baseKey + "_y" + i]);
+  if (!isNaN(yv)) return yv;
+  var uv = parseFloat(p[baseKey]);
+  return isNaN(uv) ? 0 : uv;
+}
+
+// DCF EBITDA 利润率 ebitda_margin_y{i}（始终按年）；越界沿用 Y5
+function marginYear(p, i) {
+  var v = parseFloat(p["ebitda_margin_y" + i]);
+  if (!isNaN(v)) return v;
+  var last = parseFloat(p.ebitda_margin_y5);
+  return isNaN(last) ? 0 : last;
+}
+
+// DCF 三层资本结构：普通股 We = 1 - Wd - Wp
+function dcfWeights(p) {
+  var wd = _num(p.debt_weight, 0);
+  var wp = _num(p.preferred_weight, 0);
+  return { wd: wd, wp: wp, we: 1 - wd - wp };
+}
+
+// 权重非法（普通股为负）
+function waccInvalid(p) {
+  return dcfWeights(p).we < -1e-6;
+}
+
+
 // ==================== 2. jsDefaults (schemas.py 默认值) ====================
 
 var jsDefaults = {
@@ -79,6 +137,7 @@ var jsDefaults = {
     common_stock: 30.0,
     beg_retn_earn: 35.0,
     new_debt_issuance: 0.0,
+    tax_basis: "etr",
   },
   dcf: {
     company_name: "示例公司 Sample Co.",
@@ -103,6 +162,8 @@ var jsDefaults = {
     beta: 1.20,
     pre_tax_cost_of_debt: 0.06,
     debt_weight: 0.30,
+    preferred_weight: 0.05,
+    cost_of_preferred: 0.08,
     terminal_growth: 0.03,
     exit_multiple: 10.0,
     tv_method: "gordon",
@@ -115,6 +176,7 @@ var jsDefaults = {
     shares_outstanding: 50.0,
     current_price: 20.0,
     valuation_timing: "mid",
+    tax_basis: "mtr",
   },
   lbo: {
     company_name: "示例公司 Sample Co.",
@@ -153,6 +215,7 @@ var jsDefaults = {
     exit_ev_ebitda: 10.0,
     exit_year: 5,
     cash_interest_rate: 0.02,
+    tax_basis: "mtr",
   },
 };
 
@@ -315,7 +378,8 @@ function jsGetPreset(pid, modelType) {
   if (!(pid in jsPresets)) throw new Error("Preset not found: " + pid);
   var preset = jsPresets[pid];
   if (!(modelType in preset.params)) throw new Error("Model type not in preset");
-  return preset.params[modelType];
+  // 与默认值合并：行业预设值覆盖默认，新增字段（tax_basis / preferred_weight 等）自动补全
+  return normalizeParams(modelType, preset.params[modelType]);
 }
 
 
@@ -598,19 +662,18 @@ function calculateThreeStatement(p) {
   // Income Statement
   var revenue = new Array(n+1).fill(0);
   revenue[0] = p.revenue_y0;
-  var growths = [p.rev_growth_y1, p.rev_growth_y2, p.rev_growth_y3, p.rev_growth_y4, p.rev_growth_y5];
-  for (var i = 1; i <= n; i++) { var g = i <= growths.length ? growths[i-1] : 0; revenue[i] = revenue[i-1] * (1+g); }
-  var cogs = revenue.map(function(r) { return r * p.cogs_pct; });
+  for (var i = 1; i <= n; i++) { var g = growthYear(p, i); revenue[i] = revenue[i-1] * (1+g); }
+  var cogs = revenue.map(function(r, j) { return r * rateYear(p, "cogs_pct", j); });
   var grossProfit = revenue.map(function(r,j) { return r - cogs[j]; });
-  var sga = revenue.map(function(r) { return r * p.sga_pct; });
-  var rd = revenue.map(function(r) { return r * p.rd_pct; });
+  var sga = revenue.map(function(r, j) { return r * rateYear(p, "sga_pct", j); });
+  var rd = revenue.map(function(r, j) { return r * rateYear(p, "rd_pct", j); });
   var ebitda = grossProfit.map(function(gp,j) { return gp - sga[j] - rd[j]; });
-  var daIs = revenue.map(function(r) { return r * p.da_pct; });
+  var daIs = revenue.map(function(r, j) { return r * rateYear(p, "da_pct", j); });
   var ebit = ebitda.map(function(e,j) { return e - daIs[j]; });
 
   // Supporting Schedules
   var ppeBeg = new Array(n+1).fill(0); ppeBeg[0] = p.beg_ppe;
-  var capex = revenue.map(function(r) { return r * p.capex_pct; });
+  var capex = revenue.map(function(r, j) { return r * rateYear(p, "capex_pct", j); });
   var ppeEnd = new Array(n+1).fill(0); ppeEnd[0] = p.beg_ppe;
   for (var i = 1; i <= n; i++) { ppeBeg[i] = ppeEnd[i-1]; ppeEnd[i] = ppeBeg[i] + capex[i] - daIs[i]; }
 
@@ -685,7 +748,7 @@ function calculateThreeStatement(p) {
   var customResults = _evalCustomItems(p.custom_items, years, contexts);
 
   return {
-    model_type: "three_statement", company_name: p.company_name, years: years,
+    model_type: "three_statement", company_name: p.company_name, years: years, tax_basis: p.tax_basis,
     income_statement: {
       revenue: revenue.map(_round2), cogs: cogs.map(_round2), gross_profit: grossProfit.map(_round2),
       sga: sga.map(_round2), rd: rd.map(_round2), ebitda: ebitda.map(_round2), da: daIs.map(_round2),
@@ -716,27 +779,27 @@ function calculateDcf(p) {
   var years = []; for (var i = 0; i <= n; i++) years.push(i);
 
   var revenue = new Array(n+1).fill(0); revenue[0] = p.revenue_y0;
-  var growths = [p.rev_growth_y1, p.rev_growth_y2, p.rev_growth_y3, p.rev_growth_y4, p.rev_growth_y5];
-  for (var i = 1; i <= n; i++) { var g = i <= growths.length ? growths[i-1] : 0; revenue[i] = revenue[i-1] * (1+g); }
+  for (var i = 1; i <= n; i++) { var g = growthYear(p, i); revenue[i] = revenue[i-1] * (1+g); }
 
-  var margins = [p.ebitda_margin_y1, p.ebitda_margin_y2, p.ebitda_margin_y3, p.ebitda_margin_y4, p.ebitda_margin_y5];
-  var ebitda = new Array(n+1).fill(0); ebitda[0] = revenue[0] * margins[0];
-  for (var i = 1; i <= n; i++) { var m = i <= margins.length ? margins[i-1] : margins[margins.length-1]; ebitda[i] = revenue[i] * m; }
+  var ebitda = new Array(n+1).fill(0); ebitda[0] = revenue[0] * marginYear(p, 1);
+  for (var i = 1; i <= n; i++) { ebitda[i] = revenue[i] * marginYear(p, i); }
 
-  var da = revenue.map(function(r) { return r * p.da_pct; });
+  var da = revenue.map(function(r, j) { return r * rateYear(p, "da_pct", j); });
   var ebit = ebitda.map(function(e,j) { return e - da[j]; });
   var nopat = ebit.map(function(e) { return e * (1 - p.tax_rate); });
 
   var deltaNwc = new Array(n+1).fill(0);
-  for (var i = 1; i <= n; i++) deltaNwc[i] = (revenue[i] - revenue[i-1]) * p.nwc_pct;
-  var capex = revenue.map(function(r) { return r * p.capex_pct; });
+  for (var i = 1; i <= n; i++) deltaNwc[i] = (revenue[i] - revenue[i-1]) * rateYear(p, "nwc_pct", i);
+  var capex = revenue.map(function(r, j) { return r * rateYear(p, "capex_pct", j); });
   var ufcf = new Array(n+1).fill(0);
   for (var i = 1; i <= n; i++) ufcf[i] = nopat[i] + da[i] - deltaNwc[i] - capex[i];
 
   var costOfEquity = p.risk_free_rate + p.equity_risk_premium * p.beta;
   var afterTaxKd = p.pre_tax_cost_of_debt * (1 - p.tax_rate);
-  var equityWeight = 1 - p.debt_weight;
-  var wacc = costOfEquity * equityWeight + afterTaxKd * p.debt_weight;
+  var w = dcfWeights(p);
+  var costOfPreferred = _num(p.cost_of_preferred, 0);
+  // WACC = We·Ke + Wp·Kp + Wd·Kd·(1-t)
+  var wacc = costOfEquity * w.we + costOfPreferred * w.wp + afterTaxKd * w.wd;
 
   var lastUfcf = ufcf[n], lastEbitda = ebitda[n];
   var tvGordon = wacc !== p.terminal_growth ? lastUfcf * (1 + p.terminal_growth) / (wacc - p.terminal_growth) : 0.0;
@@ -773,7 +836,7 @@ function calculateDcf(p) {
   var customResults = _evalCustomItems(p.custom_items, years, contexts);
 
   return {
-    model_type: "dcf", company_name: p.company_name, years: years,
+    model_type: "dcf", company_name: p.company_name, years: years, tax_basis: p.tax_basis,
     operating_model: {
       revenue: revenue.map(_round2), ebitda: ebitda.map(_round2), da: da.map(_round2),
       ebit: ebit.map(_round2), nopat: nopat.map(_round2), delta_nwc: deltaNwc.map(_round2),
@@ -781,7 +844,9 @@ function calculateDcf(p) {
     },
     wacc: {
       cost_of_equity: _round2(costOfEquity), after_tax_cost_of_debt: _round2(afterTaxKd),
-      equity_weight: _round2(equityWeight), debt_weight: _round2(p.debt_weight), wacc: _round2(wacc),
+      equity_weight: _round2(w.we), debt_weight: _round2(w.wd), wacc: _round2(wacc),
+      preferred_weight: _round2(w.wp), cost_of_preferred: _round2(costOfPreferred),
+      weights_sum: _round2(w.we + w.wp + w.wd), tax_basis: p.tax_basis,
     },
     terminal_value: {
       tv_method: p.tv_method, tv_gordon: _round2(tvGordon), tv_exit: _round2(tvExit),
@@ -798,7 +863,7 @@ function calculateDcf(p) {
 }
 
 function calculateLbo(p) {
-  var n = 5;
+  var n = Math.max(1, Math.min(10, parseInt(p.exit_year, 10) || 5));
   var years = []; for (var i = 0; i <= n; i++) years.push(i);
 
   var entryEv = p.ltm_ebitda * p.entry_ev_ebitda;
@@ -811,15 +876,14 @@ function calculateLbo(p) {
   var suBalance = Math.abs(totalSources - totalUses) < 0.01;
 
   var revenue = new Array(n+1).fill(0); revenue[0] = p.ltm_revenue;
-  var growths = [p.rev_growth_y1, p.rev_growth_y2, p.rev_growth_y3, p.rev_growth_y4, p.rev_growth_y5];
-  for (var i = 1; i <= n; i++) { var g = i <= growths.length ? growths[i-1] : 0; revenue[i] = revenue[i-1] * (1+g); }
+  for (var i = 1; i <= n; i++) { var g = growthYear(p, i); revenue[i] = revenue[i-1] * (1+g); }
   var ebitda = new Array(n+1).fill(0); ebitda[0] = p.ltm_ebitda;
-  for (var i = 1; i <= n; i++) ebitda[i] = revenue[i] * p.ebitda_margin;
-  var da = revenue.map(function(r) { return r * p.da_pct; });
+  for (var i = 1; i <= n; i++) ebitda[i] = revenue[i] * rateYear(p, "ebitda_margin", i);
+  var da = revenue.map(function(r, j) { return r * rateYear(p, "da_pct", j); });
   var ebit = ebitda.map(function(e,j) { return e - da[j]; });
-  var capex = revenue.map(function(r) { return r * p.capex_pct; });
+  var capex = revenue.map(function(r, j) { return r * rateYear(p, "capex_pct", j); });
   var deltaNwc = new Array(n+1).fill(0);
-  for (var i = 1; i <= n; i++) deltaNwc[i] = -revenue[i] * p.nwc_pct;
+  for (var i = 1; i <= n; i++) deltaNwc[i] = -revenue[i] * rateYear(p, "nwc_pct", i);
 
   var begCash = new Array(n+1).fill(0); begCash[0] = p.existing_cash;
   var cfads = new Array(n+1).fill(0), cashAvail = new Array(n+1).fill(0);
@@ -890,7 +954,7 @@ function calculateLbo(p) {
   var customResults = _evalCustomItems(p.custom_items, years, contexts);
 
   return {
-    model_type: "lbo", company_name: p.company_name, years: years,
+    model_type: "lbo", company_name: p.company_name, years: years, tax_basis: p.tax_basis,
     sources_uses: {
       entry_ev: _round2(entryEv), purchase_equity: _round2(purchaseEquity), refinance_debt: _round2(refiDebt),
       transaction_fees: _round2(transFees), financing_fees: _round2(finFees), total_uses: _round2(totalUses),
@@ -925,558 +989,1043 @@ function calculateLbo(p) {
 }
 
 function jsCalculate(modelType, params) {
-  if (modelType === "three_statement") return calculateThreeStatement(params);
-  if (modelType === "dcf") return calculateDcf(params);
-  if (modelType === "lbo") return calculateLbo(params);
+  var p = normalizeParams(modelType, params);
+  if (modelType === "three_statement") return calculateThreeStatement(p);
+  if (modelType === "dcf") return calculateDcf(p);
+  if (modelType === "lbo") return calculateLbo(p);
   throw new Error("Unknown model type: " + modelType);
 }
 
 
 // ==================== 6. jsBuildExcel (builders/*.py) ====================
 
-function jsBuildExcel(modelType, params) {
-  var wb = XLSX.utils.book_new();
-  if (modelType === "three_statement") buildThreeStatementExcel(wb, params);
-  else if (modelType === "dcf") buildDcfExcel(wb, params);
-  else if (modelType === "lbo") buildLboExcel(wb, params);
-  else throw new Error("Unknown model type: " + modelType);
+// ==================== 5b. ExcelJS 专业样式导出 ====================
+var XL_FMT = {
+  num: '#,##0.00;(#,##0.00);-',
+  num0: '#,##0;(#,##0);-',
+  pct: '0.0%;(0.0%);-',
+  pct2: '0.00%;(0.00%);-',
+  mult: '0.00"x"',
+  ratio2: '0.00',
+  price: '#,##0.00;(#,##0.00);-',
+  int: '#,##0;(#,##0);-'
+};
+var XL_C = {
+  header: 'FF1F4E78', headerFont: 'FFFFFFFF', sub: 'FFD6E4F0', label: 'FFF2F2F2',
+  input: 'FFFFF2CC', inputFont: 'FF0000FF', total: 'FFE2EFDA', border: 'FFBFBFBF',
+  dark: 'FF1F4E78', grey: 'FF808080', ok: 'FFC6EFCE', bad: 'FFFFC7CE', plainFont: 'FF333333'
+};
 
-  var wbout = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
-  return new Blob([wbout], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+function xlThin(color) {
+  var s = { style: 'thin', color: { argb: color || XL_C.border } };
+  return { top: s, left: s, bottom: s, right: s };
+}
+
+function xlStyleCell(cell, kind, fmt) {
+  var k = kind || 'plain';
+  cell.border = xlThin();
+  cell.alignment = { vertical: 'center' };
+  if (fmt) cell.numFmt = fmt;
+  if (k === 'title') {
+    cell.border = {};
+    cell.font = { bold: true, size: 14, color: { argb: XL_C.dark } };
+  } else if (k === 'header') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.header } };
+    cell.font = { bold: true, size: 10, color: { argb: XL_C.headerFont } };
+    cell.alignment = { horizontal: 'center', vertical: 'center' };
+  } else if (k === 'sub') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.sub } };
+    cell.font = { bold: true, size: 10, color: { argb: XL_C.dark } };
+  } else if (k === 'label') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.label } };
+    cell.font = { size: 10, color: { argb: XL_C.plainFont } };
+  } else if (k === 'input') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.input } };
+    cell.font = { size: 10, color: { argb: XL_C.inputFont } };
+    cell.alignment = { horizontal: 'right', vertical: 'center' };
+  } else if (k === 'total') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.total } };
+    cell.font = { bold: true, size: 10 };
+  } else if (k === 'note') {
+    cell.border = {};
+    cell.font = { italic: true, size: 9, color: { argb: XL_C.grey } };
+    cell.alignment = { wrapText: true, vertical: 'top', horizontal: 'left' };
+  } else if (k === 'ok') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.ok } };
+    cell.font = { bold: true, size: 10 };
+    cell.alignment = { horizontal: 'center', vertical: 'center' };
+  } else if (k === 'bad') {
+    cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: XL_C.bad } };
+    cell.font = { bold: true, size: 10 };
+    cell.alignment = { horizontal: 'center', vertical: 'center' };
+  } else {
+    cell.font = { size: 10, color: { argb: XL_C.plainFont } };
+    cell.alignment = { horizontal: 'right', vertical: 'center' };
+  }
+}
+
+// 声明式 sheet 构建器：所有行号显式（公式按固定行号引用）
+function xlSheet(wb, name, ncols, opts) {
+  opts = opts || {};
+  var ws = wb.addWorksheet(name, {});
+  if (opts.freeze) ws.views = [{ state: 'frozen', xSplit: opts.freeze[0] || 0, ySplit: opts.freeze[1] || 0 }];
+  var widths = opts.widths || [];
+  for (var ci = 1; ci <= ncols; ci++) ws.getColumn(ci).width = widths[ci - 1] || (ci === 1 ? 42 : 13);
+  var r = 0;
+
+  function styleRange(row, kind) {
+    for (var c = 1; c <= ncols; c++) xlStyleCell(ws.getCell(row, c), kind);
+  }
+  function setVal(cell, raw) {
+    if (typeof raw === 'string' && raw.charAt(0) === '=') cell.value = { formula: raw.substring(1) };
+    else cell.value = raw;
+  }
+  var api = {
+    ws: ws, ncols: ncols,
+    row: function () { return r; },
+    title: function (text) {
+      r++;
+      ws.getCell(r, 1).value = text;
+      styleRange(r, 'title');
+      if (ncols > 1) ws.mergeCells(r, 1, r, ncols);
+      ws.getRow(r).height = 24;
+    },
+    blank: function () { r++; },
+    section: function (text) {
+      r++;
+      ws.getCell(r, 1).value = text;
+      styleRange(r, 'sub');
+      if (ncols > 1) ws.mergeCells(r, 1, r, ncols);
+    },
+    note: function (text, height) {
+      r++;
+      ws.getCell(r, 1).value = text;
+      styleRange(r, 'note');
+      if (ncols > 1) ws.mergeCells(r, 1, r, ncols);
+      ws.getRow(r).height = height || 42;
+    },
+    header: function (arr) {
+      r++;
+      for (var c = 1; c <= ncols; c++) {
+        var cell = ws.getCell(r, c);
+        if (arr[c - 1] !== null && arr[c - 1] !== undefined) cell.value = arr[c - 1];
+        xlStyleCell(cell, 'header');
+      }
+      ws.getRow(r).height = 18;
+    },
+    // label + vals（从 B 列起，长度 ncols-1）；o: {fmt, numKind:'input'|'plain', total:bool}
+    row: function (label, vals, o) {
+      r++;
+      o = o || {};
+      var nk = o.numKind || 'plain';
+      var lc = ws.getCell(r, 1);
+      lc.value = label;
+      xlStyleCell(lc, o.total ? 'total' : 'label');
+      for (var c = 2; c <= ncols; c++) {
+        var raw = vals ? vals[c - 2] : null;
+        var kind = o.total ? 'total' : (typeof raw === 'string' && raw.charAt(0) === '=' ? 'plain' : nk);
+        var fmt = o.fmt || null;
+        if (raw !== null && raw !== undefined && raw !== '') {
+          if (typeof raw === 'object') {
+            if (raw.f) fmt = raw.f;
+            if (raw.k) kind = raw.k;
+            raw = raw.v;
+          }
+          setVal(ws.getCell(r, c), raw);
+        }
+        xlStyleCell(ws.getCell(r, c), kind, fmt);
+      }
+    }
+  };
+  return api;
+}
+
+// 比率是否按年细化（表单 toggle 开启时存在 _y1 键）
+function xlRatioIsPer(p, baseKey) {
+  var v = p[baseKey + '_y1'];
+  return v !== undefined && v !== null && v !== '';
+}
+// Assumptions 比率行值：[B列统一值(Year0用), Year1..Year n]
+function xlRatioVals(p, baseKey, n) {
+  var per = xlRatioIsPer(p, baseKey);
+  var base = parseFloat(p[baseKey]);
+  if (isNaN(base)) base = null;
+  var vals = [base];
+  for (var i = 1; i <= n; i++) {
+    if (per) {
+      var yv = parseFloat(p[baseKey + '_y' + i]);
+      vals.push(isNaN(yv) ? base : yv);
+    } else vals.push(base);
+  }
+  return { per: per, vals: vals };
+}
+// 始终按年字段（增长率/DCF EBITDA margin）：[空(B), y1..yn]
+function xlYearlyVals(p, baseKey, n) {
+  var vals = [null];
+  for (var i = 1; i <= n; i++) {
+    var v = parseFloat(p[baseKey + '_y' + i]);
+    vals.push(isNaN(v) ? 0 : v);
+  }
+  return vals;
+}
+// Assumptions 行引用：未细化或 Year0 → 锁 $B$row；细化年份 → 对应年列
+function aRef(A, per, row, yi) {
+  return A + '!' + (per && yi > 0 ? ycol(yi) + row : '$B$' + row);
+}
+
+function xlTaxLabel(p) {
+  return p.tax_basis === 'mtr'
+    ? 'Tax Rate 税率 (MTR 边际税率)'
+    : 'Tax Rate 税率 (ETR 有效税率)';
+}
+
+async function jsBuildExcel(modelType, params) {
+  var wb = new ExcelJS.Workbook();
+  wb.creator = 'Financial Model Generator';
+  wb.created = new Date();
+  if (modelType === 'three_statement') buildThreeStatementExcel(wb, params);
+  else if (modelType === 'dcf') buildDcfExcel(wb, params);
+  else if (modelType === 'lbo') buildLboExcel(wb, params);
+  else throw new Error('Unknown model type: ' + modelType);
+
+  var buf = await wb.xlsx.writeBuffer();
+  return new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 
 // --- 三表联动模型 Excel ---
 function buildThreeStatementExcel(wb, p) {
   var n = p.projection_years;
+  var NC = n + 2;
   var A = "Assumptions", IS = "'Income Statement'", SCH = "'Supporting Schedules'", BS = "'Balance Sheet'", CFS = "'Cash Flow Statement'";
+  var F = XL_FMT;
+  var wA = [42]; for (var wc = 1; wc <= n + 1; wc++) wA.push(12);
+  function headArr() { var h = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) h.push("Year " + i); return h; }
+  function yvals(fn) { var v = []; for (var yi = 0; yi <= n; yi++) v.push(fn(yi)); return v; }
 
-  // Assumptions sheet
-  var aAoa = [];
-  aAoa[0] = ["Assumptions 假设参数"];
-  aAoa[2] = ["参数 Parameter", "Year 0"]; for (var i = 1; i <= n; i++) aAoa[2].push("Year " + i);
-  aAoa[3] = ["运营假设 Operating Assumptions"];
-  aAoa[4] = ["Revenue (base) 基期收入", p.revenue_y0];
-  aAoa[5] = ["Revenue Growth % 收入增长率", ""]; for (var i = 0; i < n; i++) aAoa[5][2+i] = [p.rev_growth_y1, p.rev_growth_y2, p.rev_growth_y3, p.rev_growth_y4, p.rev_growth_y5][i];
-  aAoa[6] = ["COGS % of Revenue 成本率", p.cogs_pct];
-  aAoa[7] = ["SG&A % of Revenue 销管费用率", p.sga_pct];
-  aAoa[8] = ["R&D % of Revenue 研发费用率", p.rd_pct];
-  aAoa[9] = ["D&A % of Revenue 折旧摊销率", p.da_pct];
-  aAoa[10] = ["Interest Rate on Debt 债务利率", p.interest_rate];
-  aAoa[11] = ["Tax Rate 税率", p.tax_rate];
-  aAoa[12] = ["Dividend Payout % 股利分配率", p.dividend_pct];
-  aAoa[13] = ["CapEx % of Revenue 资本支出率", p.capex_pct];
-  aAoa[15] = ["营运资本天数 Working Capital Days"];
-  aAoa[16] = ["DSO 应收天数", p.dso];
-  aAoa[17] = ["DIO 库存天数", p.dio];
-  aAoa[18] = ["DPO 应付天数", p.dpo];
-  aAoa[19] = ["Accrued Days 应计天数", p.accrued_days];
-  aAoa[21] = ["期初资产负债表 Beginning Balance Sheet"];
-  aAoa[22] = ["Beginning Cash 期初现金", p.beg_cash];
-  aAoa[23] = ["Beginning AR 期初应收", p.beg_ar];
-  aAoa[24] = ["Beginning Inventory 期初库存", p.beg_inventory];
-  aAoa[25] = ["Beginning PP&E 期初固定资产", p.beg_ppe];
-  aAoa[26] = ["Beginning AP 期初应付", p.beg_ap];
-  aAoa[27] = ["Beginning Accrued 期初应计", p.beg_accrued];
-  aAoa[28] = ["Beginning Debt 期初债务", p.beg_debt];
-  aAoa[29] = ["Common Stock 普通股", p.common_stock];
-  aAoa[30] = ["Beginning Retained Earnings 期初留存收益", p.beg_retn_earn];
-  aAoa[32] = ["其他 Other"];
-  aAoa[33] = ["New Debt Issuance (annual) 新增债务"]; for (var i = 0; i < n; i++) { if (!aAoa[33]) aAoa[33] = []; aAoa[33][2+i] = p.new_debt_issuance; }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aAoa), "Assumptions");
+  var cogs = xlRatioVals(p, "cogs_pct", n);
+  var sgaR = xlRatioVals(p, "sga_pct", n);
+  var rdR = xlRatioVals(p, "rd_pct", n);
+  var daR = xlRatioVals(p, "da_pct", n);
+  var cxR = xlRatioVals(p, "capex_pct", n);
 
-  // Income Statement
-  var isAoa = [];
-  isAoa[0] = ["Income Statement 利润表"];
-  isAoa[2] = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) isAoa[2].push("Year " + i);
-  function isRow(r, fn) { isAoa[r-1] = []; isAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) isAoa[r-1][1+yi] = fn(yi, "val"); }
-  isRow(5, function(yi, typ) { if (typ === "label") return "Revenue 营业收入"; if (yi === 0) return "=" + A + "!B5"; var prev = ycol(yi-1); return "=" + prev + "5*(1+" + A + "!" + ycol(yi) + "6)"; });
-  isRow(6, function(yi, typ) { if (typ === "label") return "Revenue Growth % 增长率"; if (yi === 0) return null; return "=" + ycol(yi) + "5/" + ycol(yi-1) + "5-1"; });
-  isRow(7, function(yi, typ) { if (typ === "label") return "COGS 营业成本"; return "=" + ycol(yi) + "5*" + A + "!$B$7"; });
-  isRow(8, function(yi, typ) { if (typ === "label") return "Gross Profit 毛利"; return "=" + ycol(yi) + "5-" + ycol(yi) + "7"; });
-  isRow(9, function(yi, typ) { if (typ === "label") return "SG&A 销管费用"; return "=" + ycol(yi) + "5*" + A + "!$B$8"; });
-  isRow(10, function(yi, typ) { if (typ === "label") return "R&D 研发费用"; return "=" + ycol(yi) + "5*" + A + "!$B$9"; });
-  isRow(11, function(yi, typ) { if (typ === "label") return "EBITDA"; return "=" + ycol(yi) + "8-" + ycol(yi) + "9-" + ycol(yi) + "10"; });
-  isRow(12, function(yi, typ) { if (typ === "label") return "D&A 折旧摊销"; if (yi === 0) return "=" + ycol(yi) + "5*" + A + "!$B$10"; return "=" + SCH + "!" + ycol(yi) + "6"; });
-  isRow(13, function(yi, typ) { if (typ === "label") return "EBIT 营业利润"; return "=" + ycol(yi) + "11-" + ycol(yi) + "12"; });
-  isRow(14, function(yi, typ) { if (typ === "label") return "Interest Expense 利息费用"; if (yi === 0) return "=" + A + "!$B$11*" + A + "!B29"; return "=" + SCH + "!" + ycol(yi) + "17"; });
-  isRow(15, function(yi, typ) { if (typ === "label") return "EBT 税前利润"; return "=" + ycol(yi) + "13-" + ycol(yi) + "14"; });
-  isRow(16, function(yi, typ) { if (typ === "label") return "Taxes 所得税"; return "=MAX(0," + ycol(yi) + "15*" + A + "!$B$12)"; });
-  isRow(17, function(yi, typ) { if (typ === "label") return "Net Income 净利润"; return "=" + ycol(yi) + "15-" + ycol(yi) + "16"; });
-  isRow(18, function(yi, typ) { if (typ === "label") return "Dividends 股利"; return "=" + ycol(yi) + "17*" + A + "!$B$13"; });
+  // ---------------- Assumptions ----------------
+  var sh = xlSheet(wb, "Assumptions", NC, { widths: wA, freeze: [1, 3] });
+  sh.title("Assumptions 假设参数");
+  sh.blank();
+  sh.header(["参数 Parameter", "Year 0"].concat((function () { var h = []; for (var i = 1; i <= n; i++) h.push("Year " + i); return h; })()));
+  sh.section("运营假设 Operating Assumptions");
+  sh.row("Revenue (base) 基期收入", [p.revenue_y0], { fmt: F.num, numKind: "input" });
+  sh.row("Revenue Growth % 收入增长率（每年可不同）", xlYearlyVals(p, "rev_growth", n), { fmt: F.pct, numKind: "input" });
+  sh.row("COGS % of Revenue 成本率", cogs.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("SG&A % of Revenue 销管费用率", sgaR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("R&D % of Revenue 研发费用率", rdR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("D&A % of Revenue 折旧摊销率", daR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("Interest Rate on Debt 债务利率", [p.interest_rate], { fmt: F.pct, numKind: "input" });
+  sh.row(xlTaxLabel(p), [p.tax_rate], { fmt: F.pct, numKind: "input" });
+  sh.row("Dividend Payout % 股利分配率", [p.dividend_pct], { fmt: F.pct, numKind: "input" });
+  sh.row("CapEx % of Revenue 资本支出率", cxR.vals, { fmt: F.pct, numKind: "input" });
+  sh.blank();
+  sh.section("营运资本天数 Working Capital Days");
+  sh.row("DSO 应收天数", [p.dso], { fmt: F.int, numKind: "input" });
+  sh.row("DIO 库存天数", [p.dio], { fmt: F.int, numKind: "input" });
+  sh.row("DPO 应付天数", [p.dpo], { fmt: F.int, numKind: "input" });
+  sh.row("Accrued Days 应计天数", [p.accrued_days], { fmt: F.int, numKind: "input" });
+  sh.blank();
+  sh.section("期初资产负债表 Beginning Balance Sheet");
+  sh.row("Beginning Cash 期初现金", [p.beg_cash], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning AR 期初应收", [p.beg_ar], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning Inventory 期初库存", [p.beg_inventory], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning PP&E 期初固定资产", [p.beg_ppe], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning AP 期初应付", [p.beg_ap], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning Accrued 期初应计", [p.beg_accrued], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning Debt 期初债务", [p.beg_debt], { fmt: F.num, numKind: "input" });
+  sh.row("Common Stock 普通股", [p.common_stock], { fmt: F.num, numKind: "input" });
+  sh.row("Beginning Retained Earnings 期初留存收益", [p.beg_retn_earn], { fmt: F.num, numKind: "input" });
+  sh.blank();
+  sh.section("其他 Other");
+  var ndVals = [null]; for (var nd = 1; nd <= n; nd++) ndVals.push(p.new_debt_issuance);
+  sh.row("New Debt Issuance (annual) 新增债务", ndVals, { fmt: F.num, numKind: "input" });
 
-  // Custom items in IS
+  // ---------------- Income Statement ----------------
+  var si = xlSheet(wb, "Income Statement", NC, { widths: wA, freeze: [1, 3] });
+  si.title("Income Statement 利润表");
+  si.blank();
+  si.header(headArr());
+  si.section("利润表主体 Profit & Loss");
+  si.row("Revenue 营业收入", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B5";
+    return "=" + ycol(yi - 1) + "5*(1+" + A + "!" + ycol(yi) + "6)";
+  }), { fmt: F.num });
+  si.row("Revenue Growth % 增长率", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "5/" + ycol(yi - 1) + "5-1";
+  }), { fmt: F.pct });
+  si.row("COGS 营业成本", yvals(function (yi) { return "=" + ycol(yi) + "5*" + aRef(A, cogs.per, 7, yi); }), { fmt: F.num });
+  si.row("Gross Profit 毛利", yvals(function (yi) { return "=" + ycol(yi) + "5-" + ycol(yi) + "7"; }), { fmt: F.num, total: true });
+  si.row("SG&A 销管费用", yvals(function (yi) { return "=" + ycol(yi) + "5*" + aRef(A, sgaR.per, 8, yi); }), { fmt: F.num });
+  si.row("R&D 研发费用", yvals(function (yi) { return "=" + ycol(yi) + "5*" + aRef(A, rdR.per, 9, yi); }), { fmt: F.num });
+  si.row("EBITDA", yvals(function (yi) { return "=" + ycol(yi) + "8-" + ycol(yi) + "9-" + ycol(yi) + "10"; }), { fmt: F.num, total: true });
+  si.row("D&A 折旧摊销", yvals(function (yi) {
+    if (yi === 0) return "=" + ycol(yi) + "5*" + aRef(A, daR.per, 10, 0);
+    return "=" + SCH + "!" + ycol(yi) + "6";
+  }), { fmt: F.num });
+  si.row("EBIT 营业利润", yvals(function (yi) { return "=" + ycol(yi) + "11-" + ycol(yi) + "12"; }), { fmt: F.num, total: true });
+  si.row("Interest Expense 利息费用", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!$B$11*" + A + "!B29";
+    return "=" + SCH + "!" + ycol(yi) + "17";
+  }), { fmt: F.num });
+  si.row("EBT 税前利润", yvals(function (yi) { return "=" + ycol(yi) + "13-" + ycol(yi) + "14"; }), { fmt: F.num, total: true });
+  si.row("Taxes 所得税", yvals(function (yi) { return "=MAX(0," + ycol(yi) + "15*" + A + "!$B$12)"; }), { fmt: F.num });
+  si.row("Net Income 净利润", yvals(function (yi) { return "=" + ycol(yi) + "15-" + ycol(yi) + "16"; }), { fmt: F.num, total: true });
+  si.row("Dividends 股利", yvals(function (yi) { return "=" + ycol(yi) + "17*" + A + "!$B$13"; }), { fmt: F.num });
+  si.blank();
   if (p.custom_items && p.custom_items.length) {
-    isAoa[19] = ["自定义行项 Custom Line Items"];
+    si.section("自定义行项 Custom Line Items");
     function buildIsCellMap(col) {
       return {
-        revenue: col+"5", cogs: col+"7", gross_profit: col+"8", sga: col+"9", rd: col+"10",
-        ebitda: col+"11", da: col+"12", ebit: col+"13", interest: col+"14", ebt: col+"15",
-        taxes: col+"16", net_income: col+"17", dividends: col+"18",
-        cash: BS+"!"+col+"5", ar: BS+"!"+col+"6", inventory: BS+"!"+col+"7", ppe: BS+"!"+col+"8",
-        total_assets: BS+"!"+col+"9", ap: BS+"!"+col+"13", accrued: BS+"!"+col+"14", debt: BS+"!"+col+"15",
-        total_liabilities: BS+"!"+col+"16", common_stock: BS+"!"+col+"20", retained_earnings: BS+"!"+col+"21",
-        total_equity: BS+"!"+col+"22", total_le: BS+"!"+col+"25", capex: SCH+"!"+col+"8", new_debt: SCH+"!"+col+"19",
+        revenue: col + "5", cogs: col + "7", gross_profit: col + "8", sga: col + "9", rd: col + "10",
+        ebitda: col + "11", da: col + "12", ebit: col + "13", interest: col + "14", ebt: col + "15",
+        taxes: col + "16", net_income: col + "17", dividends: col + "18",
+        cash: BS + "!" + col + "5", ar: BS + "!" + col + "6", inventory: BS + "!" + col + "7", ppe: BS + "!" + col + "8",
+        total_assets: BS + "!" + col + "9", ap: BS + "!" + col + "13", accrued: BS + "!" + col + "14", debt: BS + "!" + col + "15",
+        total_liabilities: BS + "!" + col + "16", common_stock: BS + "!" + col + "20", retained_earnings: BS + "!" + col + "21",
+        total_equity: BS + "!" + col + "22", total_le: BS + "!" + col + "25", capex: SCH + "!" + col + "8", new_debt: SCH + "!" + col + "19"
       };
     }
     for (var idx = 0; idx < p.custom_items.length; idx++) {
-      var ci = p.custom_items[idx]; var r = 21 + idx;
-      isAoa[r-1] = [ci.name];
-      for (var yi = 0; yi <= n; yi++) {
-        var col = ycol(yi); var cm = buildIsCellMap(col);
-        try { isAoa[r-1][1+yi] = expressionToExcel(ci.formula, cm); } catch(e) { isAoa[r-1][1+yi] = '="#ERR: ' + String(e.message || e).substring(0,30) + '"'; }
-      }
+      var ci = p.custom_items[idx];
+      var civals = yvals(function (yi) {
+        var col = ycol(yi);
+        try { return expressionToExcel(ci.formula, buildIsCellMap(col)); }
+        catch (e) { return '="#ERR: ' + String(e.message || e).substring(0, 30) + '"'; }
+      });
+      // yvals 闭包内 ci 用 var 已固定（顺序执行），无需额外绑定
+      si.row(ci.name, civals, { fmt: F.num });
     }
   }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(isAoa), "Income Statement");
 
-  // Supporting Schedules
-  var schAoa = [];
-  schAoa[0] = ["Supporting Schedules 辅助表"];
-  schAoa[2] = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) schAoa[2].push("Year " + i);
-  schAoa[3] = ["PP&E 滚动 PP&E Roll-forward"];
-  function schRow(r, fn) { schAoa[r-1] = []; schAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) schAoa[r-1][1+yi] = fn(yi, "val"); }
-  schRow(6, function(yi, typ) { if (typ === "label") return "D&A 折旧摊销"; return "=" + IS + "!" + ycol(yi) + "5*" + A + "!$B$10"; });
-  schRow(7, function(yi, typ) { if (typ === "label") return "Beginning PP&E 期初固定资产"; if (yi === 0) return "=" + A + "!B26"; return "=" + ycol(yi-1) + "10"; });
-  schRow(8, function(yi, typ) { if (typ === "label") return "CapEx 资本支出"; return "=" + IS + "!" + ycol(yi) + "5*" + A + "!$B$14"; });
-  schRow(9, function(yi, typ) { if (typ === "label") return "Less: D&A 减:折旧"; return "=-" + ycol(yi) + "6"; });
-  schRow(10, function(yi, typ) { if (typ === "label") return "Ending PP&E 期末固定资产"; if (yi === 0) return "=" + ycol(yi) + "7"; return "=" + ycol(yi) + "7+" + ycol(yi) + "8+" + ycol(yi) + "9"; });
-  schAoa[14] = ["债务滚动 Debt Roll-forward"];
-  schRow(17, function(yi, typ) { if (typ === "label") return "Interest Expense 利息费用"; if (yi === 0) return "=" + A + "!$B$11*" + A + "!B29"; return "=" + A + "!$B$11*" + BS + "!" + ycol(yi-1) + "15"; });
-  schRow(18, function(yi, typ) { if (typ === "label") return "Beginning Debt 期初债务"; if (yi === 0) return "=" + A + "!B29"; return "=" + ycol(yi-1) + "20"; });
-  schRow(19, function(yi, typ) { if (typ === "label") return "New Debt Issuance 新增债务"; if (yi === 0) return "=0"; return "=" + A + "!" + ycol(yi) + "34"; });
-  schRow(20, function(yi, typ) { if (typ === "label") return "Ending Debt 期末债务"; if (yi === 0) return "=" + ycol(yi) + "18"; return "=" + ycol(yi) + "18+" + ycol(yi) + "19"; });
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(schAoa), "Supporting Schedules");
+  // ---------------- Supporting Schedules ----------------
+  var ss = xlSheet(wb, "Supporting Schedules", NC, { widths: wA, freeze: [1, 3] });
+  ss.title("Supporting Schedules 辅助表");
+  ss.blank();
+  ss.header(headArr());
+  ss.section("PP&E 滚动 PP&E Roll-forward");
+  ss.blank();
+  ss.row("D&A 折旧摊销", yvals(function (yi) { return "=" + IS + "!" + ycol(yi) + "5*" + aRef(A, daR.per, 10, yi); }), { fmt: F.num });
+  ss.row("Beginning PP&E 期初固定资产", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B26";
+    return "=" + ycol(yi - 1) + "10";
+  }), { fmt: F.num });
+  ss.row("CapEx 资本支出", yvals(function (yi) { return "=" + IS + "!" + ycol(yi) + "5*" + aRef(A, cxR.per, 14, yi); }), { fmt: F.num });
+  ss.row("Less: D&A 减:折旧", yvals(function (yi) { return "=-" + ycol(yi) + "6"; }), { fmt: F.num });
+  ss.row("Ending PP&E 期末固定资产", yvals(function (yi) {
+    if (yi === 0) return "=" + ycol(yi) + "7";
+    return "=" + ycol(yi) + "7+" + ycol(yi) + "8+" + ycol(yi) + "9";
+  }), { fmt: F.num, total: true });
+  ss.blank(); ss.blank(); ss.blank();
+  ss.section("债务滚动 Debt Roll-forward");
+  ss.blank(); ss.blank();
+  ss.row("Interest Expense 利息费用", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!$B$11*" + A + "!B29";
+    return "=" + A + "!$B$11*" + BS + "!" + ycol(yi - 1) + "15";
+  }), { fmt: F.num });
+  ss.row("Beginning Debt 期初债务", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B29";
+    return "=" + ycol(yi - 1) + "20";
+  }), { fmt: F.num });
+  ss.row("New Debt Issuance 新增债务", yvals(function (yi) {
+    if (yi === 0) return "=0";
+    return "=" + A + "!" + ycol(yi) + "34";
+  }), { fmt: F.num });
+  ss.row("Ending Debt 期末债务", yvals(function (yi) {
+    if (yi === 0) return "=" + ycol(yi) + "18";
+    return "=" + ycol(yi) + "18+" + ycol(yi) + "19";
+  }), { fmt: F.num, total: true });
 
-  // Balance Sheet
-  var bsAoa = [];
-  bsAoa[0] = ["Balance Sheet 资产负债表"];
-  bsAoa[2] = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) bsAoa[2].push("Year " + i);
-  bsAoa[3] = ["资产 Assets"];
-  function bsRow(r, fn) { bsAoa[r-1] = []; bsAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) bsAoa[r-1][1+yi] = fn(yi, "val"); }
-  bsRow(5, function(yi, typ) { if (typ === "label") return "Cash 现金"; if (yi === 0) return "=" + A + "!B23"; return "=" + ycol(yi-1) + "5+" + CFS + "!" + ycol(yi) + "23"; });
-  bsRow(6, function(yi, typ) { if (typ === "label") return "Accounts Receivable 应收账款"; if (yi === 0) return "=" + A + "!B24"; return "=" + IS + "!" + ycol(yi) + "5/365*" + A + "!$B$17"; });
-  bsRow(7, function(yi, typ) { if (typ === "label") return "Inventory 存货"; if (yi === 0) return "=" + A + "!B25"; return "=" + IS + "!" + ycol(yi) + "7/365*" + A + "!$B$18"; });
-  bsRow(8, function(yi, typ) { if (typ === "label") return "PP&E, net 固定资产净额"; if (yi === 0) return "=" + A + "!B26"; return "=" + SCH + "!" + ycol(yi) + "10"; });
-  bsRow(9, function(yi, typ) { if (typ === "label") return "Total Assets 总资产"; return "=SUM(" + ycol(yi) + "5:" + ycol(yi) + "8)"; });
-  bsAoa[11] = ["负债 Liabilities"];
-  bsRow(13, function(yi, typ) { if (typ === "label") return "Accounts Payable 应付账款"; if (yi === 0) return "=" + A + "!B27"; return "=" + IS + "!" + ycol(yi) + "7/365*" + A + "!$B$19"; });
-  bsRow(14, function(yi, typ) { if (typ === "label") return "Accrued Expenses 应计费用"; if (yi === 0) return "=" + A + "!B28"; return "=" + IS + "!" + ycol(yi) + "5/365*" + A + "!$B$20"; });
-  bsRow(15, function(yi, typ) { if (typ === "label") return "Debt 债务"; if (yi === 0) return "=" + A + "!B29"; return "=" + SCH + "!" + ycol(yi) + "20"; });
-  bsRow(16, function(yi, typ) { if (typ === "label") return "Total Liabilities 总负债"; return "=SUM(" + ycol(yi) + "13:" + ycol(yi) + "15)"; });
-  bsAoa[18] = ["权益 Equity"];
-  bsRow(20, function(yi, typ) { if (typ === "label") return "Common Stock 普通股"; return "=" + A + "!$B$30"; });
-  bsRow(21, function(yi, typ) { if (typ === "label") return "Retained Earnings 留存收益"; if (yi === 0) return "=" + A + "!B31"; return "=" + ycol(yi-1) + "21+" + IS + "!" + ycol(yi) + "17-" + IS + "!" + ycol(yi) + "18"; });
-  bsRow(22, function(yi, typ) { if (typ === "label") return "Total Equity 总权益"; return "=" + ycol(yi) + "20+" + ycol(yi) + "21"; });
-  bsRow(25, function(yi, typ) { if (typ === "label") return "Total Liabilities + Equity 总负债权益"; return "=" + ycol(yi) + "16+" + ycol(yi) + "22"; });
-  bsAoa[26] = ["平衡校验 Balance Check"];
-  for (var yi = 0; yi <= n; yi++) { var col = ycol(yi); bsAoa[26][1+yi] = '=IF(ROUND(' + col + '9-' + col + '25,2)=0,"BALANCED","OUT OF BALANCE")'; }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(bsAoa), "Balance Sheet");
+  // ---------------- Balance Sheet ----------------
+  var sb = xlSheet(wb, "Balance Sheet", NC, { widths: wA, freeze: [1, 3] });
+  sb.title("Balance Sheet 资产负债表");
+  sb.blank();
+  sb.header(headArr());
+  sb.section("资产 Assets");
+  sb.row("Cash 现金", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B23";
+    return "=" + ycol(yi - 1) + "5+" + CFS + "!" + ycol(yi) + "23";
+  }), { fmt: F.num });
+  sb.row("Accounts Receivable 应收账款", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B24";
+    return "=" + IS + "!" + ycol(yi) + "5/365*" + A + "!$B$17";
+  }), { fmt: F.num });
+  sb.row("Inventory 存货", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B25";
+    return "=" + IS + "!" + ycol(yi) + "7/365*" + A + "!$B$18";
+  }), { fmt: F.num });
+  sb.row("PP&E, net 固定资产净额", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B26";
+    return "=" + SCH + "!" + ycol(yi) + "10";
+  }), { fmt: F.num });
+  sb.row("Total Assets 总资产", yvals(function (yi) { return "=SUM(" + ycol(yi) + "5:" + ycol(yi) + "8)"; }), { fmt: F.num, total: true });
+  sb.blank(); sb.blank();
+  sb.section("负债 Liabilities");
+  sb.row("Accounts Payable 应付账款", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B27";
+    return "=" + IS + "!" + ycol(yi) + "7/365*" + A + "!$B$19";
+  }), { fmt: F.num });
+  sb.row("Accrued Expenses 应计费用", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B28";
+    return "=" + IS + "!" + ycol(yi) + "5/365*" + A + "!$B$20";
+  }), { fmt: F.num });
+  sb.row("Debt 债务", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B29";
+    return "=" + SCH + "!" + ycol(yi) + "20";
+  }), { fmt: F.num });
+  sb.row("Total Liabilities 总负债", yvals(function (yi) { return "=SUM(" + ycol(yi) + "13:" + ycol(yi) + "15)"; }), { fmt: F.num, total: true });
+  sb.blank(); sb.blank();
+  sb.section("权益 Equity");
+  sb.row("Common Stock 普通股", yvals(function () { return "=" + A + "!$B$30"; }), { fmt: F.num });
+  sb.row("Retained Earnings 留存收益", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B31";
+    return "=" + ycol(yi - 1) + "21+" + IS + "!" + ycol(yi) + "17-" + IS + "!" + ycol(yi) + "18";
+  }), { fmt: F.num });
+  sb.row("Total Equity 总权益", yvals(function (yi) { return "=" + ycol(yi) + "20+" + ycol(yi) + "21"; }), { fmt: F.num, total: true });
+  sb.blank(); sb.blank();
+  sb.row("Total Liabilities + Equity 总负债权益", yvals(function (yi) { return "=" + ycol(yi) + "16+" + ycol(yi) + "22"; }), { fmt: F.num, total: true });
+  sb.blank();
+  sb.row("平衡校验 Balance Check", yvals(function (yi) {
+    var col = ycol(yi);
+    return '=IF(ROUND(' + col + '9-' + col + '25,2)=0,"BALANCED","OUT OF BALANCE")';
+  }), {});
 
-  // Cash Flow Statement
-  var cfsAoa = [];
-  cfsAoa[0] = ["Cash Flow Statement 现金流量表"];
-  cfsAoa[2] = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) cfsAoa[2].push("Year " + i);
-  cfsAoa[3] = ["经营活动 Operating Activities"];
-  function cfsRow(r, fn) { cfsAoa[r-1] = []; cfsAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) cfsAoa[r-1][1+yi] = fn(yi, "val"); }
-  cfsRow(6, function(yi, typ) { if (typ === "label") return "Net Income 净利润"; if (yi === 0) return null; return "=" + IS + "!" + ycol(yi) + "17"; });
-  cfsRow(7, function(yi, typ) { if (typ === "label") return "D&A 折旧摊销"; if (yi === 0) return null; return "=" + SCH + "!" + ycol(yi) + "6"; });
-  cfsRow(8, function(yi, typ) { if (typ === "label") return "Change in AR 应收变动"; if (yi === 0) return null; return "=-(" + BS + "!" + ycol(yi) + "6-" + BS + "!" + ycol(yi-1) + "6)"; });
-  cfsRow(9, function(yi, typ) { if (typ === "label") return "Change in Inventory 存货变动"; if (yi === 0) return null; return "=-(" + BS + "!" + ycol(yi) + "7-" + BS + "!" + ycol(yi-1) + "7)"; });
-  cfsRow(10, function(yi, typ) { if (typ === "label") return "Change in AP 应付变动"; if (yi === 0) return null; return "=" + BS + "!" + ycol(yi) + "13-" + BS + "!" + ycol(yi-1) + "13"; });
-  cfsRow(11, function(yi, typ) { if (typ === "label") return "Change in Accrued 应计变动"; if (yi === 0) return null; return "=" + BS + "!" + ycol(yi) + "14-" + BS + "!" + ycol(yi-1) + "14"; });
-  cfsRow(12, function(yi, typ) { if (typ === "label") return "Cash from Operations 经营现金流"; if (yi === 0) return null; return "=SUM(" + ycol(yi) + "6:" + ycol(yi) + "11)"; });
-  cfsAoa[13] = ["投资活动 Investing Activities"];
-  cfsRow(15, function(yi, typ) { if (typ === "label") return "CapEx 资本支出"; if (yi === 0) return null; return "=-" + IS + "!" + ycol(yi) + "5*" + A + "!$B$14"; });
-  cfsRow(16, function(yi, typ) { if (typ === "label") return "Cash from Investing 投资现金流"; if (yi === 0) return null; return "=" + ycol(yi) + "15"; });
-  cfsAoa[17] = ["筹资活动 Financing Activities"];
-  cfsRow(19, function(yi, typ) { if (typ === "label") return "Net Debt Change 债务净变动"; if (yi === 0) return null; return "=" + BS + "!" + ycol(yi) + "15-" + BS + "!" + ycol(yi-1) + "15"; });
-  cfsRow(20, function(yi, typ) { if (typ === "label") return "Dividends Paid 支付股利"; if (yi === 0) return null; return "=-" + IS + "!" + ycol(yi) + "18"; });
-  cfsRow(21, function(yi, typ) { if (typ === "label") return "Cash from Financing 筹资现金流"; if (yi === 0) return null; return "=SUM(" + ycol(yi) + "19:" + ycol(yi) + "20)"; });
-  cfsRow(23, function(yi, typ) { if (typ === "label") return "Net Change in Cash 现金净变动"; if (yi === 0) return null; return "=" + ycol(yi) + "12+" + ycol(yi) + "16+" + ycol(yi) + "21"; });
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(cfsAoa), "Cash Flow Statement");
+  // ---------------- Cash Flow Statement ----------------
+  var sc = xlSheet(wb, "Cash Flow Statement", NC, { widths: wA, freeze: [1, 3] });
+  sc.title("Cash Flow Statement 现金流量表");
+  sc.blank();
+  sc.header(headArr());
+  sc.section("经营活动 Operating Activities");
+  sc.blank();
+  sc.row("Net Income 净利润", yvals(function (yi) { if (yi === 0) return null; return "=" + IS + "!" + ycol(yi) + "17"; }), { fmt: F.num });
+  sc.row("D&A 折旧摊销", yvals(function (yi) { if (yi === 0) return null; return "=" + SCH + "!" + ycol(yi) + "6"; }), { fmt: F.num });
+  sc.row("Change in AR 应收变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=-(" + BS + "!" + ycol(yi) + "6-" + BS + "!" + ycol(yi - 1) + "6)";
+  }), { fmt: F.num });
+  sc.row("Change in Inventory 存货变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=-(" + BS + "!" + ycol(yi) + "7-" + BS + "!" + ycol(yi - 1) + "7)";
+  }), { fmt: F.num });
+  sc.row("Change in AP 应付变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + BS + "!" + ycol(yi) + "13-" + BS + "!" + ycol(yi - 1) + "13";
+  }), { fmt: F.num });
+  sc.row("Change in Accrued 应计变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + BS + "!" + ycol(yi) + "14-" + BS + "!" + ycol(yi - 1) + "14";
+  }), { fmt: F.num });
+  sc.row("Cash from Operations 经营现金流", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=SUM(" + ycol(yi) + "6:" + ycol(yi) + "11)";
+  }), { fmt: F.num, total: true });
+  sc.blank();
+  sc.section("投资活动 Investing Activities");
+  sc.row("CapEx 资本支出", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=-" + IS + "!" + ycol(yi) + "5*" + aRef(A, cxR.per, 14, yi);
+  }), { fmt: F.num });
+  sc.row("Cash from Investing 投资现金流", yvals(function (yi) { if (yi === 0) return null; return "=" + ycol(yi) + "15"; }), { fmt: F.num, total: true });
+  sc.blank();
+  sc.section("筹资活动 Financing Activities");
+  sc.row("Net Debt Change 债务净变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + BS + "!" + ycol(yi) + "15-" + BS + "!" + ycol(yi - 1) + "15";
+  }), { fmt: F.num });
+  sc.row("Dividends Paid 支付股利", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=-" + IS + "!" + ycol(yi) + "18";
+  }), { fmt: F.num });
+  sc.row("Cash from Financing 筹资现金流", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=SUM(" + ycol(yi) + "19:" + ycol(yi) + "20)";
+  }), { fmt: F.num, total: true });
+  sc.blank();
+  sc.row("Net Change in Cash 现金净变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "12+" + ycol(yi) + "16+" + ycol(yi) + "21";
+  }), { fmt: F.num, total: true });
 
-  // Dashboard
-  var dashAoa = [];
-  dashAoa[0] = ["Dashboard 关键指标摘要"];
-  dashAoa[2] = ["指标 Metric", "Year 0"]; for (var i = 1; i <= n; i++) dashAoa[2].push("Year " + i);
-  function dashRow(r, fn) { dashAoa[r-1] = []; dashAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) dashAoa[r-1][1+yi] = fn(yi, "val"); }
-  dashRow(5, function(yi, typ) { if (typ === "label") return "Revenue 营业收入"; return "=" + IS + "!" + ycol(yi) + "5"; });
-  dashRow(6, function(yi, typ) { if (typ === "label") return "EBITDA"; return "=" + IS + "!" + ycol(yi) + "11"; });
-  dashRow(7, function(yi, typ) { if (typ === "label") return "EBIT 营业利润"; return "=" + IS + "!" + ycol(yi) + "13"; });
-  dashRow(8, function(yi, typ) { if (typ === "label") return "Net Income 净利润"; return "=" + IS + "!" + ycol(yi) + "17"; });
-  dashRow(9, function(yi, typ) { if (typ === "label") return "Total Assets 总资产"; return "=" + BS + "!" + ycol(yi) + "9"; });
-  dashRow(10, function(yi, typ) { if (typ === "label") return "Total Debt 总债务"; return "=" + BS + "!" + ycol(yi) + "15"; });
-  dashRow(11, function(yi, typ) { if (typ === "label") return "Cash 现金"; return "=" + BS + "!" + ycol(yi) + "5"; });
-  dashRow(12, function(yi, typ) { if (typ === "label") return "Retained Earnings 留存收益"; return "=" + BS + "!" + ycol(yi) + "21"; });
-  dashRow(14, function(yi, typ) { if (typ === "label") return "EBITDA Margin %"; if (yi === 0) return null; return "=" + IS + "!" + ycol(yi) + "11/" + IS + "!" + ycol(yi) + "5"; });
-  dashRow(15, function(yi, typ) { if (typ === "label") return "Net Margin %"; if (yi === 0) return null; return "=" + IS + "!" + ycol(yi) + "17/" + IS + "!" + ycol(yi) + "5"; });
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(dashAoa), "Dashboard");
+  // ---------------- Dashboard ----------------
+  var sd = xlSheet(wb, "Dashboard", NC, { widths: wA, freeze: [1, 3] });
+  sd.title("Dashboard 关键指标摘要");
+  sd.blank();
+  sd.header(headArr());
+  sd.blank();
+  sd.row("Revenue 营业收入", yvals(function (yi) { return "=" + IS + "!" + ycol(yi) + "5"; }), { fmt: F.num });
+  sd.row("EBITDA", yvals(function (yi) { return "=" + IS + "!" + ycol(yi) + "11"; }), { fmt: F.num });
+  sd.row("EBIT 营业利润", yvals(function (yi) { return "=" + IS + "!" + ycol(yi) + "13"; }), { fmt: F.num });
+  sd.row("Net Income 净利润", yvals(function (yi) { return "=" + IS + "!" + ycol(yi) + "17"; }), { fmt: F.num });
+  sd.row("Total Assets 总资产", yvals(function (yi) { return "=" + BS + "!" + ycol(yi) + "9"; }), { fmt: F.num });
+  sd.row("Total Debt 总债务", yvals(function (yi) { return "=" + BS + "!" + ycol(yi) + "15"; }), { fmt: F.num });
+  sd.row("Cash 现金", yvals(function (yi) { return "=" + BS + "!" + ycol(yi) + "5"; }), { fmt: F.num });
+  sd.row("Retained Earnings 留存收益", yvals(function (yi) { return "=" + BS + "!" + ycol(yi) + "21"; }), { fmt: F.num });
+  sd.blank();
+  sd.row("EBITDA Margin %", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + IS + "!" + ycol(yi) + "11/" + IS + "!" + ycol(yi) + "5";
+  }), { fmt: F.pct });
+  sd.row("Net Margin %", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + IS + "!" + ycol(yi) + "17/" + IS + "!" + ycol(yi) + "5";
+  }), { fmt: F.pct });
 }
 
 // --- DCF 模型 Excel ---
 function buildDcfExcel(wb, p) {
   var n = p.projection_years;
+  var NC = n + 2;
   var A = "Assumptions", OP = "'Operating Model'", W = "WACC", TV = "'Terminal Value'", DV = "'DCF Valuation'";
+  var F = XL_FMT;
+  var wA = [42]; for (var wc = 1; wc <= n + 1; wc++) wA.push(12);
+  function yhead() { var h = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) h.push("Year " + i); return h; }
+  function yvals(fn) { var v = []; for (var yi = 0; yi <= n; yi++) v.push(fn(yi)); return v; }
 
-  // Assumptions
-  var aAoa = [];
-  aAoa[0] = ["Assumptions 假设参数"];
-  aAoa[2] = ["参数 Parameter", "Year 0"]; for (var i = 1; i <= n; i++) aAoa[2].push("Year " + i);
-  aAoa[3] = ["运营假设 Operating Assumptions"];
-  aAoa[4] = ["Revenue (base) 基期收入", p.revenue_y0];
-  aAoa[5] = ["Revenue Growth % 收入增长率", ""]; for (var i = 0; i < n; i++) aAoa[5][2+i] = [p.rev_growth_y1, p.rev_growth_y2, p.rev_growth_y3, p.rev_growth_y4, p.rev_growth_y5][i];
-  aAoa[6] = ["EBITDA Margin %"]; for (var i = 0; i < n; i++) aAoa[6][2+i] = [p.ebitda_margin_y1, p.ebitda_margin_y2, p.ebitda_margin_y3, p.ebitda_margin_y4, p.ebitda_margin_y5][i];
-  aAoa[7] = ["D&A % of Revenue 折旧摊销率", p.da_pct];
-  aAoa[8] = ["CapEx % of Revenue 资本支出率", p.capex_pct];
-  aAoa[9] = ["NWC % of Revenue 净营运资本率", p.nwc_pct];
-  aAoa[10] = ["Tax Rate 税率", p.tax_rate];
-  aAoa[12] = ["WACC 资本成本"];
-  aAoa[13] = ["Risk-free Rate 无风险利率", p.risk_free_rate];
-  aAoa[14] = ["Equity Risk Premium 股权风险溢价", p.equity_risk_premium];
-  aAoa[15] = ["Beta", p.beta];
-  aAoa[16] = ["Pre-tax Cost of Debt 税前债务成本", p.pre_tax_cost_of_debt];
-  aAoa[17] = ["Target Debt Weight 目标债务权重", p.debt_weight];
-  aAoa[19] = ["终值 Terminal Value"];
-  aAoa[20] = ["Terminal Growth Rate g 终值增长率", p.terminal_growth];
-  aAoa[21] = ["Exit EV/EBITDA 退出倍数", p.exit_multiple];
-  aAoa[22] = ["TV Method 终值方法", p.tv_method];
-  aAoa[24] = ["EV→Equity 桥"];
-  aAoa[25] = ["Total Debt 总债务", p.net_debt];
-  aAoa[26] = ["Cash 现金", p.cash];
-  aAoa[27] = ["Minority Interest 少数股东权益", p.minority_interest];
-  aAoa[28] = ["Preferred Stock 优先股", p.preferred_stock];
-  aAoa[29] = ["Stock-Based Compensation 股权激励", p.stock_based_comp];
-  aAoa[30] = ["Pension Deficit 养老金缺口", p.pension_deficit];
-  aAoa[31] = ["Shares Outstanding (M) 流通股本", p.shares_outstanding];
-  aAoa[32] = ["Current Share Price 当前股价", p.current_price];
-  aAoa[33] = ["Valuation Timing 估值时点 (mid,end)", p.valuation_timing];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aAoa), "Assumptions");
+  var daR = xlRatioVals(p, "da_pct", n);
+  var cxR = xlRatioVals(p, "capex_pct", n);
+  var nwR = xlRatioVals(p, "nwc_pct", n);
 
-  // Operating Model
-  var opAoa = [];
-  opAoa[0] = ["Operating Model 运营模型"];
-  opAoa[2] = ["项目 Item", "Year 0"]; for (var i = 1; i <= n; i++) opAoa[2].push("Year " + i);
-  function opRow(r, fn) { opAoa[r-1] = []; opAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) opAoa[r-1][1+yi] = fn(yi, "val"); }
-  opRow(5, function(yi, typ) { if (typ === "label") return "Revenue 营业收入"; if (yi === 0) return "=" + A + "!B5"; return "=" + ycol(yi-1) + "5*(1+" + A + "!" + ycol(yi) + "6)"; });
-  opRow(6, function(yi, typ) { if (typ === "label") return "Revenue Growth % 增长率"; if (yi === 0) return null; return "=" + ycol(yi) + "5/" + ycol(yi-1) + "5-1"; });
-  opRow(7, function(yi, typ) { if (typ === "label") return "EBITDA"; if (yi > 0) return "=" + ycol(yi) + "5*" + A + "!" + ycol(yi) + "7"; return "=" + ycol(yi) + "5*" + A + "!C7"; });
-  opRow(8, function(yi, typ) { if (typ === "label") return "EBITDA Margin %"; if (yi === 0) return null; return "=" + ycol(yi) + "7/" + ycol(yi) + "5"; });
-  opRow(9, function(yi, typ) { if (typ === "label") return "D&A 折旧摊销"; return "=" + ycol(yi) + "5*" + A + "!$B$8"; });
-  opRow(10, function(yi, typ) { if (typ === "label") return "EBIT 营业利润"; return "=" + ycol(yi) + "7-" + ycol(yi) + "9"; });
-  opRow(11, function(yi, typ) { if (typ === "label") return "EBIT Margin %"; if (yi === 0) return null; return "=" + ycol(yi) + "10/" + ycol(yi) + "5"; });
-  opRow(12, function(yi, typ) { if (typ === "label") return "NOPAT 税后营业利润"; return "=" + ycol(yi) + "10*(1-" + A + "!$B$11)"; });
-  opRow(13, function(yi, typ) { if (typ === "label") return "Δ NWC 净营运资本变动"; if (yi === 0) return null; return "=(" + ycol(yi) + "5-" + ycol(yi-1) + "5)*" + A + "!$B$10"; });
-  opRow(14, function(yi, typ) { if (typ === "label") return "CapEx 资本支出"; return "=" + ycol(yi) + "5*" + A + "!$B$9"; });
-  opRow(15, function(yi, typ) { if (typ === "label") return "Unlevered FCF 无杠杆自由现金流"; if (yi === 0) return null; return "=" + ycol(yi) + "12+" + ycol(yi) + "9-" + ycol(yi) + "13-" + ycol(yi) + "14"; });
+  // ---------------- Assumptions ----------------
+  var sh = xlSheet(wb, "Assumptions", NC, { widths: wA, freeze: [1, 3] });
+  sh.title("Assumptions 假设参数");
+  sh.blank();
+  sh.header(["参数 Parameter", "Year 0"].concat((function () { var h = []; for (var i = 1; i <= n; i++) h.push("Year " + i); return h; })()));
+  sh.section("运营假设 Operating Assumptions");
+  sh.row("Revenue (base) 基期收入", [p.revenue_y0], { fmt: F.num, numKind: "input" });
+  sh.row("Revenue Growth % 收入增长率（每年可不同）", xlYearlyVals(p, "rev_growth", n), { fmt: F.pct, numKind: "input" });
+  sh.row("EBITDA Margin % EBITDA利润率（每年可不同）", [null].concat((function () {
+    var v = []; for (var i = 1; i <= n; i++) { var x = parseFloat(p["ebitda_margin_y" + i]); v.push(isNaN(x) ? 0 : x); } return v;
+  })()), { fmt: F.pct, numKind: "input" });
+  sh.row("D&A % of Revenue 折旧摊销率", daR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("CapEx % of Revenue 资本支出率", cxR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("NWC % of Revenue 净营运资本率", nwR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row(xlTaxLabel(p), [p.tax_rate], { fmt: F.pct, numKind: "input" });
+  sh.blank();
+  sh.section("WACC 资本成本");
+  sh.row("Risk-free Rate 无风险利率 Rf", [p.risk_free_rate], { fmt: F.pct, numKind: "input" });
+  sh.row("Equity Risk Premium 股权风险溢价 ERP", [p.equity_risk_premium], { fmt: F.pct, numKind: "input" });
+  sh.row("Beta β", [p.beta], { fmt: F.ratio2, numKind: "input" });
+  sh.row("Pre-tax Cost of Debt 税前债务成本 Kd", [p.pre_tax_cost_of_debt], { fmt: F.pct, numKind: "input" });
+  sh.row("Target Debt Weight 目标债务权重 Wd", [p.debt_weight], { fmt: F.pct, numKind: "input" });
+  sh.row("Preferred Weight 优先股权重 Wp", [p.preferred_weight], { fmt: F.pct, numKind: "input" });
+  sh.row("Cost of Preferred 优先股成本 Kp", [p.cost_of_preferred], { fmt: F.pct, numKind: "input" });
+  sh.blank();
+  sh.section("终值 Terminal Value");
+  sh.row("Terminal Growth Rate g 终值增长率", [p.terminal_growth], { fmt: F.pct, numKind: "input" });
+  sh.row("Exit EV/EBITDA 退出倍数", [p.exit_multiple], { fmt: F.mult, numKind: "input" });
+  sh.row("TV Method 终值方法 (gordon/exit)", [p.tv_method], { numKind: "input" });
+  sh.blank();
+  sh.section("EV → Equity 桥 Bridge");
+  sh.row("Total Debt 总债务（扣减）", [p.net_debt], { fmt: F.num, numKind: "input" });
+  sh.row("Cash 现金（加回）", [p.cash], { fmt: F.num, numKind: "input" });
+  sh.row("Minority Interest 少数股东权益（扣减）", [p.minority_interest], { fmt: F.num, numKind: "input" });
+  sh.row("Preferred Stock 优先股账面值（扣减）", [p.preferred_stock], { fmt: F.num, numKind: "input" });
+  sh.row("Stock-Based Compensation 股权激励（扣减）", [p.stock_based_comp], { fmt: F.num, numKind: "input" });
+  sh.row("Pension Deficit 养老金缺口（扣减）", [p.pension_deficit], { fmt: F.num, numKind: "input" });
+  sh.row("Shares Outstanding (M) 流通股本（百万）", [p.shares_outstanding], { fmt: F.num0, numKind: "input" });
+  sh.row("Current Share Price 当前股价", [p.current_price], { fmt: F.price, numKind: "input" });
+  sh.row("Valuation Timing 估值时点 (mid/end)", [p.valuation_timing], { numKind: "input" });
+
+  // ---------------- Operating Model ----------------
+  var so = xlSheet(wb, "Operating Model", NC, { widths: wA, freeze: [1, 3] });
+  so.title("Operating Model 运营模型");
+  so.blank();
+  so.header(yhead());
+  so.section("无杠杆自由现金流 Unlevered Free Cash Flow");
+  so.row("Revenue 营业收入", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B5";
+    return "=" + ycol(yi - 1) + "5*(1+" + A + "!" + ycol(yi) + "6)";
+  }), { fmt: F.num });
+  so.row("Revenue Growth % 增长率", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "5/" + ycol(yi - 1) + "5-1";
+  }), { fmt: F.pct });
+  so.row("EBITDA", yvals(function (yi) {
+    if (yi > 0) return "=" + ycol(yi) + "5*" + A + "!" + ycol(yi) + "7";
+    return "=" + ycol(yi) + "5*" + A + "!C7";
+  }), { fmt: F.num, total: true });
+  so.row("EBITDA Margin %", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "7/" + ycol(yi) + "5";
+  }), { fmt: F.pct });
+  so.row("D&A 折旧摊销", yvals(function (yi) { return "=" + ycol(yi) + "5*" + aRef(A, daR.per, 8, yi); }), { fmt: F.num });
+  so.row("EBIT 营业利润", yvals(function (yi) { return "=" + ycol(yi) + "7-" + ycol(yi) + "9"; }), { fmt: F.num, total: true });
+  so.row("EBIT Margin %", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "10/" + ycol(yi) + "5";
+  }), { fmt: F.pct });
+  so.row("NOPAT 税后营业利润", yvals(function (yi) { return "=" + ycol(yi) + "10*(1-" + A + "!$B$11)"; }), { fmt: F.num });
+  so.row("Δ NWC 净营运资本变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=(" + ycol(yi) + "5-" + ycol(yi - 1) + "5)*" + aRef(A, nwR.per, 10, yi);
+  }), { fmt: F.num });
+  so.row("CapEx 资本支出", yvals(function (yi) { return "=" + ycol(yi) + "5*" + aRef(A, cxR.per, 9, yi); }), { fmt: F.num });
+  so.row("Unlevered FCF 无杠杆自由现金流", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "12+" + ycol(yi) + "9-" + ycol(yi) + "13-" + ycol(yi) + "14";
+  }), { fmt: F.num, total: true });
 
   if (p.custom_items && p.custom_items.length) {
-    opAoa[16] = ["自定义行项 Custom Line Items"];
+    so.blank();
+    so.section("自定义行项 Custom Line Items");
     function buildOpCellMap(col) {
       return {
-        revenue: col+"5", ebitda: col+"7", da: col+"9", ebit: col+"10", nopat: col+"12",
-        delta_nwc: col+"13", capex: col+"14", ufcf: col+"15", wacc: W+"!$B$14", cost_of_equity: W+"!$B$8",
-        after_tax_kd: W+"!$B$11", tv_gordon: TV+"!$B$5", tv_exit: TV+"!$B$6", selected_tv: TV+"!$B$7",
-        pv_tv: TV+"!$B$9", sum_pv_fcf: DV+"!$B$10", enterprise_value: DV+"!$B$12", equity_value: DV+"!$B$22",
-        implied_price: DV+"!$B$24", current_price: A+"!$B$33", shares_outstanding: A+"!$B$32",
-        net_debt: A+"!$B$26", cash: A+"!$B$27",
+        revenue: col + "5", ebitda: col + "7", da: col + "9", ebit: col + "10", nopat: col + "12",
+        delta_nwc: col + "13", capex: col + "14", ufcf: col + "15", wacc: W + "!$B$22",
+        cost_of_equity: W + "!$B$8", cost_of_preferred: W + "!$B$14",
+        preferred_weight: W + "!$B$17", equity_weight: W + "!$B$18",
+        after_tax_kd: W + "!$B$12", tv_gordon: TV + "!$B$5", tv_exit: TV + "!$B$6",
+        selected_tv: TV + "!$B$7", pv_tv: TV + "!$B$9", sum_pv_fcf: DV + "!$B$9",
+        enterprise_value: DV + "!$B$11", equity_value: DV + "!$B$21", implied_price: DV + "!$B$23",
+        current_price: A + "!$B$35", shares_outstanding: A + "!$B$34",
+        net_debt: A + "!$B$28", cash: A + "!$B$29"
       };
     }
     for (var idx = 0; idx < p.custom_items.length; idx++) {
-      var ci = p.custom_items[idx]; var r = 18 + idx;
-      opAoa[r-1] = [ci.name];
-      for (var yi = 0; yi <= n; yi++) {
-        var col = ycol(yi); var cm = buildOpCellMap(col);
-        try { opAoa[r-1][1+yi] = expressionToExcel(ci.formula, cm); } catch(e) { opAoa[r-1][1+yi] = '="#ERR: ' + String(e.message || e).substring(0,30) + '"'; }
-      }
+      var ci = p.custom_items[idx];
+      var civals = yvals(function (yi) {
+        var col = ycol(yi);
+        try { return expressionToExcel(ci.formula, buildOpCellMap(col)); }
+        catch (e) { return '="#ERR: ' + String(e.message || e).substring(0, 30) + '"'; }
+      });
+      so.row(ci.name, civals, { fmt: F.num });
     }
   }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(opAoa), "Operating Model");
 
-  // WACC
-  var wAoa = [];
-  wAoa[0] = ["WACC 加权平均资本成本"];
-  wAoa[2] = ["项目 Item", "Value"];
-  wAoa[4] = ["Risk-free Rate (Rf) 无风险利率", "=" + A + "!B14"];
-  wAoa[5] = ["Equity Risk Premium (ERP) 股权风险溢价", "=" + A + "!B15"];
-  wAoa[6] = ["Beta", "=" + A + "!B16"];
-  wAoa[7] = ["Cost of Equity (CAPM) 股权成本", "=B5+B6*B7"];
-  wAoa[8] = ["Pre-tax Cost of Debt 税前债务成本", "=" + A + "!B17"];
-  wAoa[9] = ["Tax Rate 税率", "=" + A + "!B11"];
-  wAoa[10] = ["After-tax Cost of Debt 税后债务成本", "=B9*(1-B10)"];
-  wAoa[11] = ["Equity Weight 股权重", "=1-" + A + "!B18"];
-  wAoa[12] = ["Debt Weight 债权重", "=" + A + "!B18"];
-  wAoa[13] = ["WACC 加权平均资本成本", "=B8*B12+B11*B13"];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(wAoa), "WACC");
+  // ---------------- WACC ----------------
+  var sw = xlSheet(wb, "WACC", 2, { widths: [44, 16], freeze: [0, 3] });
+  sw.title("WACC 加权平均资本成本");
+  sw.blank();
+  sw.header(["项目 Item", "Value"]);
+  sw.section("普通股成本 Cost of Equity (CAPM)");
+  sw.row("Risk-free Rate (Rf) 无风险利率", ["=" + A + "!B14"], { fmt: F.pct });
+  sw.row("Equity Risk Premium (ERP) 股权风险溢价", ["=" + A + "!B15"], { fmt: F.pct });
+  sw.row("Beta β", ["=" + A + "!B16"], { fmt: F.ratio2 });
+  sw.row("Cost of Equity (Ke = Rf + β×ERP) 普通股成本", ["=B5+B6*B7"], { fmt: F.pct, total: true });
+  sw.section("债务与优先股成本 Debt & Preferred");
+  sw.row("Pre-tax Cost of Debt 税前债务成本 Kd", ["=" + A + "!B17"], { fmt: F.pct });
+  sw.row("Tax Rate 税率（" + (p.tax_basis === "mtr" ? "MTR 边际税率" : "ETR 有效税率") + "）", ["=" + A + "!B11"], { fmt: F.pct });
+  sw.row("After-tax Cost of Debt 税后债务成本", ["=B10*(1-B11)"], { fmt: F.pct });
+  sw.row("Preferred Weight 优先股权重 Wp", ["=" + A + "!B19"], { fmt: F.pct });
+  sw.row("Cost of Preferred (Kp) 优先股成本", ["=" + A + "!B20"], { fmt: F.pct });
+  sw.section("目标资本结构 Target Capital Structure");
+  sw.row("Debt Weight 债务权重 Wd", ["=" + A + "!B17"], { fmt: F.pct });
+  sw.row("Preferred Weight 优先股权重 Wp", ["=" + A + "!B19"], { fmt: F.pct });
+  sw.row("Common Equity Weight 普通股权重 We (=1−Wd−Wp)", ["=1-B16-B17"], { fmt: F.pct });
+  sw.row("权重合计 Sum of Weights（应=100%）", ["=B16+B17+B18"], { fmt: F.pct });
+  sw.row("权重校验 Weight Check", ['=IF(ROUND(B19,4)=1,"OK","请检查权重")'], {});
+  sw.section("加权平均资本成本 Weighted Average");
+  sw.row("WACC = Ke×We + Kp×Wp + Kd×(1−t)×Wd", ["=B8*B18+B14*B17+B12*B16"], { fmt: F.pct, total: true });
+  sw.blank();
+  sw.note("说明：WACC 为三层资本结构加权——普通股 Ke（CAPM）×自动权重 We、优先股 Kp×Wp、税后债务成本 Kd×(1−税率)×Wd。仅债务利息可抵税，故债务项使用税后成本；优先股与普通股股利均不可抵税。税率口径（ETR 有效税率 / MTR 边际税率）取自 Assumptions。", 56);
 
-  // Terminal Value
-  var tvAoa = [];
+  // ---------------- Terminal Value ----------------
   var lastCol = ycol(n);
-  tvAoa[0] = ["Terminal Value 终值"];
-  tvAoa[2] = ["项目 Item", "Value"];
-  tvAoa[4] = ["Gordon Growth TV 戈登增长终值", "=" + OP + "!" + lastCol + "15*(1+" + A + "!$B$21)/(" + W + "!$B$14-" + A + "!$B$21)"];
-  tvAoa[5] = ["Exit Multiple TV 退出倍数终值", "=" + OP + "!" + lastCol + "7*" + A + "!$B$22"];
-  tvAoa[6] = ["Selected TV 选定终值", '=IF(' + A + '!$B$23="gordon",B5,B6)'];
-  tvAoa[7] = ["Discount Period (Years) 折现期数", "=" + n];
-  tvAoa[8] = ["PV of Terminal Value 终值现值", "=B7/(1+" + W + "!$B$14)^B8"];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(tvAoa), "Terminal Value");
+  var st = xlSheet(wb, "Terminal Value", 2, { widths: [46, 18], freeze: [0, 3] });
+  st.title("Terminal Value 终值");
+  st.blank();
+  st.header(["项目 Item", "Value"]);
+  st.blank();
+  st.row("TV (Gordon Growth) 戈登增长终值", ["=" + OP + "!" + lastCol + "15*(1+" + A + "!$B$23)/(" + W + "!$B$22-" + A + "!$B$23)"], { fmt: F.num });
+  st.row("TV (Exit Multiple) 退出倍数终值", ["=" + OP + "!" + lastCol + "7*" + A + "!$B$24"], { fmt: F.num });
+  st.row("Selected TV 选定终值", ['=IF(' + A + '!$B$25="gordon",B5,B6)'], { fmt: F.num, total: true });
+  st.row("Discount Period (Years) 折现期数", ["=" + n], { fmt: F.int });
+  st.row("PV of Terminal Value 终值现值", ["=B7/(1+" + W + "!$B$22)^B8"], { fmt: F.num, total: true });
+  st.blank();
+  st.note("两种终值方法说明：\n① 戈登增长法（永续增长）：假设预测期后企业以终值增长率 g 永续经营，TV = 末年FCF×(1+g)/(WACC−g)。\n② 退出倍数法：假设在退出年按“退出年 EBITDA × 退出 EV/EBITDA 倍数”出售企业。\n“Selected TV”根据 Assumptions 中的 TV Method（gordon/exit）自动二选一；该终值折现后（PV of TV）计入 DCF Valuation 的企业价值 EV。", 84);
 
-  // DCF Valuation
-  var dvAoa = [];
-  dvAoa[0] = ["DCF Valuation 估值汇总"];
-  dvAoa[2] = ["项目 Item"]; for (var i = 1; i <= n; i++) dvAoa[2].push("Year " + i);
+  // ---------------- DCF Valuation ----------------
+  var NCV = n + 1; // A + Year1..n
+  var wv = [42]; for (var wc2 = 1; wc2 <= n; wc2++) wv.push(12);
+  var sv = xlSheet(wb, "DCF Valuation", NCV, { widths: wv, freeze: [1, 3] });
+  sv.title("DCF Valuation 估值汇总");
+  sv.blank();
+  var dhead = ["项目 Item"]; for (var i = 1; i <= n; i++) dhead.push("Year " + i);
+  sv.header(dhead);
+  sv.section("预测期现金流折现 Discounting");
   var isMid = p.valuation_timing === "mid";
-  function dvRow(r, fn) { dvAoa[r-1] = []; dvAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi < n; yi++) dvAoa[r-1][1+yi] = fn(yi+1, "val"); }
-  dvRow(5, function(yi, typ) { if (typ === "label") return "Unlevered FCF 自由现金流"; return "=" + OP + "!" + ycol(yi) + "15"; });
-  dvRow(6, function(yi, typ) { if (typ === "label") return "Discount Period 折现期数"; var period = isMid ? yi - 0.5 : yi; return "=" + period; });
-  dvRow(7, function(yi, typ) { if (typ === "label") return "Discount Factor 折现因子"; return "=1/(1+" + W + "!$B$14)^" + ycol(yi) + "6"; });
-  dvRow(8, function(yi, typ) { if (typ === "label") return "PV of FCF FCF现值"; return "=" + ycol(yi) + "5*" + ycol(yi) + "7"; });
-  dvAoa[9] = ["Sum of PV of FCF FCF现值合计", "=SUM(" + ycol(1) + "8:" + ycol(n) + "8)"];
-  dvAoa[10] = ["PV of Terminal Value 终值现值", "=" + TV + "!B9"];
-  dvAoa[11] = ["Enterprise Value 企业价值", "=B10+B11"];
-  dvAoa[13] = ["EV → Equity 桥"];
-  dvAoa[14] = ["Enterprise Value 企业价值", "=B12"];
-  dvAoa[15] = ["Less: Total Debt 减:总债务", "=-" + A + "!B26"];
-  dvAoa[16] = ["Plus: Cash 加:现金", "=" + A + "!B27"];
-  dvAoa[17] = ["Less: Minority Interest 减:少数股东权益", "=-" + A + "!B28"];
-  dvAoa[18] = ["Less: Preferred Stock 减:优先股", "=-" + A + "!B29"];
-  dvAoa[19] = ["Less: Stock-Based Comp 减:股权激励", "=-" + A + "!B30"];
-  dvAoa[20] = ["Less: Pension Deficit 减:养老金缺口", "=-" + A + "!B31"];
-  dvAoa[21] = ["Equity Value 股权价值", "=SUM(B15:B21)"];
-  dvAoa[22] = ["Shares Outstanding (M) 流通股本", "=" + A + "!B32"];
-  dvAoa[23] = ["Implied Share Price 隐含股价", "=B22/B23"];
-  dvAoa[24] = ["Current Share Price 当前股价", "=" + A + "!B33"];
-  dvAoa[25] = ["Upside/(Downside) % 涨跌幅", "=B24/B25-1"];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(dvAoa), "DCF Valuation");
+  function dvVals(fn) { var v = []; for (var yi = 1; yi <= n; yi++) v.push(fn(yi)); return v; }
+  sv.row("Unlevered FCF 自由现金流", dvVals(function (yi) { return "=" + OP + "!" + ycol(yi) + "15"; }), { fmt: F.num });
+  sv.row("Discount Period 折现期数", dvVals(function (yi) { return "=" + (isMid ? yi - 0.5 : yi); }), { fmt: F.ratio2 });
+  sv.row("Discount Factor 折现因子", dvVals(function (yi) { return "=1/(1+" + W + "!$B$22)^" + ycol(yi) + "6"; }), { fmt: F.ratio2 });
+  sv.row("PV of FCF FCF现值", dvVals(function (yi) { return "=" + ycol(yi) + "5*" + ycol(yi) + "7"; }), { fmt: F.num });
+  sv.row("Sum of PV of FCF FCF现值合计", ["=SUM(" + ycol(1) + "8:" + ycol(n) + "8)"], { fmt: F.num, total: true });
+  sv.row("PV of Terminal Value 终值现值", ["=" + TV + "!B9"], { fmt: F.num, total: true });
+  sv.row("Enterprise Value 企业价值 (EV=ΣPV(FCF)+PV(TV))", ["=B9+B10"], { fmt: F.num, total: true });
+  sv.blank();
+  sv.section("EV → Equity 桥 Bridge to Equity Value");
+  sv.row("Enterprise Value 企业价值", ["=B11"], { fmt: F.num });
+  sv.row("Less: Total Debt 减:总债务", ["=-" + A + "!B28"], { fmt: F.num });
+  sv.row("Plus: Cash 加:现金", ["=" + A + "!B29"], { fmt: F.num });
+  sv.row("Less: Minority Interest 减:少数股东权益", ["=-" + A + "!B30"], { fmt: F.num });
+  sv.row("Less: Preferred Stock 减:优先股账面值", ["=-" + A + "!B31"], { fmt: F.num });
+  sv.row("Less: Stock-Based Comp 减:股权激励", ["=-" + A + "!B32"], { fmt: F.num });
+  sv.row("Less: Pension Deficit 减:养老金缺口", ["=-" + A + "!B33"], { fmt: F.num });
+  sv.row("Equity Value 股权价值", ["=SUM(B14:B20)"], { fmt: F.num, total: true });
+  sv.row("Shares Outstanding (M) 流通股本（百万）", ["=" + A + "!B34"], { fmt: F.num0 });
+  sv.row("Implied Share Price 隐含股价", ["=B21/B22"], { fmt: F.price, total: true });
+  sv.row("Current Share Price 当前股价", ["=" + A + "!B35"], { fmt: F.price });
+  sv.row("Upside/(Downside) % 涨跌幅", ["=B23/B24-1"], { fmt: F.pct, total: true });
 
-  // Sensitivity
-  var sAoa = [];
-  sAoa[0] = ["Sensitivity 敏感性分析"];
-  sAoa[1] = ["行=终值增长率 g，列=WACC；单元格=隐含股价"];
-  var gVals = [p.terminal_growth-0.01, p.terminal_growth-0.005, p.terminal_growth, p.terminal_growth+0.005, p.terminal_growth+0.01];
+  // ---------------- Sensitivity ----------------
+  var s2 = xlSheet(wb, "Sensitivity", 6, { widths: [18, 13, 13, 13, 13, 13] });
+  s2.title("Sensitivity 敏感性分析");
+  s2.note("行=终值增长率 g，列=WACC；单元格=隐含股价（按戈登增长法重算终值）。", 28);
+  s2.blank();
+  var gVals = [p.terminal_growth - 0.01, p.terminal_growth - 0.005, p.terminal_growth, p.terminal_growth + 0.005, p.terminal_growth + 0.01];
   var wVals = [0.08, 0.09, 0.10, 0.11, 0.12];
-  sAoa[3] = ["g \\ WACC"];
-  for (var j = 0; j < wVals.length; j++) sAoa[3][1+j] = wVals[j];
-  for (var i = 0; i < gVals.length; i++) {
-    sAoa[4+i] = [gVals[i]];
-    for (var j = 0; j < wVals.length; j++) {
-      var wc = ycol(j) + "$4", gc = "$A" + (5+i);
+  var head5 = ["g \\ WACC"].concat(wVals);
+  s2.header(head5);
+  for (var hc = 2; hc <= 6; hc++) s2.ws.getCell(4, hc).numFmt = F.pct;
+  for (var gi = 0; gi < gVals.length; gi++) {
+    var rowVals = [];
+    for (var gj = 0; gj < wVals.length; gj++) {
+      var wc = ycol(gj) + "$4", gcc = "$A" + (5 + gi);
       var pvTerms = [];
       for (var t = 1; t <= n; t++) pvTerms.push(OP + "!" + ycol(t) + "15/(1+" + wc + ")^" + t);
-      var tv = OP + "!" + lastCol + "15*(1+" + gc + ")/(" + wc + "-" + gc + ")";
-      var pvTv = tv + "/(1+" + wc + ")^" + n;
+      var tvExpr = OP + "!" + lastCol + "15*(1+" + gcc + ")/(" + wc + "-" + gcc + ")";
+      var pvTv = tvExpr + "/(1+" + wc + ")^" + n;
       var ev = "(" + pvTerms.join("+") + ")+" + pvTv;
-      var equity = "(" + ev + ")-" + A + "!$B$26+" + A + "!$B$27-" + A + "!$B$28-" + A + "!$B$29-" + A + "!$B$30-" + A + "!$B$31";
-      sAoa[4+i][1+j] = "=((" + equity + ")/" + A + "!$B$32)";
+      var equity = "(" + ev + ")-" + A + "!$B$28+" + A + "!$B$29-" + A + "!$B$30-" + A + "!$B$31-" + A + "!$B$32-" + A + "!$B$33";
+      rowVals.push({ v: "=((" + equity + ")/" + A + "!$B$34)", f: F.price });
     }
+    s2.row(gVals[gi], rowVals, { fmt: F.pct, numKind: "input" });
   }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(sAoa), "Sensitivity");
 }
 
 // --- LBO 模型 Excel ---
 function buildLboExcel(wb, p) {
-  var n = 5;
+  var n = Math.max(1, Math.min(10, parseInt(p.exit_year, 10) || 5));
+  var NC = n + 2;
   var A = "Assumptions", SU = "'Sources & Uses'", DS = "'Debt Schedule'", IS = "'Income Statement'", CF = "'Cash Flow (CFADS)'";
+  var F = XL_FMT;
+  var wA = [42, 13]; for (var wc = 1; wc <= n; wc++) wA.push(12);
+  function yHeadL(first) { var h = ["项目 Item", first]; for (var i = 1; i <= n; i++) h.push("Year " + i); return h; }
+  function yvals(fn) { var v = []; for (var yi = 0; yi <= n; yi++) v.push(fn(yi)); return v; }
 
-  // Assumptions
-  var aAoa = [];
-  aAoa[0] = ["Assumptions 假设参数"];
-  aAoa[2] = ["参数 Parameter", "Value"]; for (var i = 1; i <= n; i++) aAoa[2].push("Year " + i);
-  aAoa[3] = ["交易假设 Transaction Assumptions"];
-  aAoa[4] = ["LTM Revenue", p.ltm_revenue];
-  aAoa[5] = ["LTM EBITDA", p.ltm_ebitda];
-  aAoa[6] = ["Entry EV/EBITDA", p.entry_ev_ebitda];
-  aAoa[7] = ["Entry EV 入场企业价值", "=B6*B7"];
-  aAoa[8] = ["Existing Net Debt 现有净债务", p.existing_net_debt];
-  aAoa[9] = ["Existing Cash 现有现金", p.existing_cash];
-  aAoa[10] = ["Transaction Fees 交易费用", p.transaction_fees];
-  aAoa[11] = ["Financing Fees 融资费用", p.financing_fees];
-  aAoa[13] = ["资本结构 Capital Structure"];
-  aAoa[13] = ["Sponsor Equity", p.sponsor_equity];
-  aAoa[14] = ["Revolver Capacity", p.revolver_capacity];
-  aAoa[15] = ["Term Loan A", p.term_loan_a];
-  aAoa[16] = ["Term Loan B", p.term_loan_b];
-  aAoa[17] = ["Senior Notes", p.senior_notes];
-  aAoa[18] = ["Subordinated Debt", p.subordinated_debt];
-  aAoa[20] = ["利率 Interest Rates"];
-  aAoa[20] = ["Revolver Rate", p.revolver_rate];
-  aAoa[21] = ["Term Loan A Rate", p.tla_rate];
-  aAoa[22] = ["Term Loan B Rate", p.tlb_rate];
-  aAoa[23] = ["Senior Notes Rate", p.senior_notes_rate];
-  aAoa[24] = ["Subordinated Debt Rate", p.sub_rate];
-  aAoa[26] = ["偿债 Debt Repayment"];
-  aAoa[26] = ["TLA Mandatory Amort %", p.tla_mandatory_amort];
-  aAoa[27] = ["TLB Mandatory Amort %", p.tlb_mandatory_amort];
-  aAoa[28] = ["Cash Sweep %", p.cash_sweep_pct];
-  aAoa[29] = ["Min Cash Balance", p.min_cash_balance];
-  aAoa[31] = ["运营假设 Operating Assumptions"];
-  aAoa[31] = ["Revenue Growth %"]; for (var i = 0; i < n; i++) aAoa[31][2+i] = [p.rev_growth_y1, p.rev_growth_y2, p.rev_growth_y3, p.rev_growth_y4, p.rev_growth_y5][i];
-  aAoa[32] = ["EBITDA Margin %"]; for (var i = 0; i < n; i++) aAoa[32][2+i] = p.ebitda_margin;
-  aAoa[33] = ["D&A % of Revenue", p.da_pct];
-  aAoa[34] = ["CapEx % of Revenue", p.capex_pct];
-  aAoa[35] = ["ΔNWC % of Revenue", p.nwc_pct];
-  aAoa[36] = ["Tax Rate", p.tax_rate];
-  aAoa[38] = ["退出 Exit"];
-  aAoa[38] = ["Exit EV/EBITDA", p.exit_ev_ebitda];
-  aAoa[39] = ["Exit Year", p.exit_year];
-  aAoa[40] = ["Cash Interest Rate", p.cash_interest_rate];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(aAoa), "Assumptions");
+  var mgR = xlRatioVals(p, "ebitda_margin", n);
+  var daR = xlRatioVals(p, "da_pct", n);
+  var cxR = xlRatioVals(p, "capex_pct", n);
+  var nwR = xlRatioVals(p, "nwc_pct", n);
 
-  // Sources & Uses
-  var suAoa = [];
-  suAoa[0] = ["Sources & Uses 资金来源与用途"];
-  suAoa[2] = ["项目 Item", "Amount"];
-  suAoa[3] = ["Uses 用途"];
-  suAoa[5] = ["Purchase of Equity 购买股权", "=" + A + "!B8-" + A + "!B9"];
-  suAoa[6] = ["Refinance Existing Debt 再融资债务", "=" + A + "!B9+" + A + "!B10"];
-  suAoa[7] = ["Transaction Fees 交易费用", "=" + A + "!B11"];
-  suAoa[8] = ["Financing Fees 融资费用", "=" + A + "!B12"];
-  suAoa[9] = ["Total Uses 用途合计", "=SUM(B6:B9)"];
-  suAoa[11] = ["Sources 来源"];
-  suAoa[12] = ["Sponsor Equity", "=" + A + "!B14"];
-  suAoa[13] = ["Revolver Draw (plug) 循环额度提取", "=B10-B13-B15-B16-B17-B18-B19"];
-  suAoa[14] = ["Term Loan A", "=" + A + "!B16"];
-  suAoa[15] = ["Term Loan B", "=" + A + "!B17"];
-  suAoa[16] = ["Senior Notes", "=" + A + "!B18"];
-  suAoa[17] = ["Subordinated Debt", "=" + A + "!B19"];
-  suAoa[18] = ["Existing Cash 现有现金", "=" + A + "!B10"];
-  suAoa[19] = ["Total Sources 来源合计", "=SUM(B13:B19)"];
-  suAoa[21] = ["平衡校验 Balance Check", '=IF(ROUND(B20-B10,2)=0,"BALANCED","IMBALANCED")'];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(suAoa), "Sources & Uses");
+  // ---------------- Assumptions（行号与公式引用严格对齐） ----------------
+  var sh = xlSheet(wb, "Assumptions", NC, { widths: wA, freeze: [1, 3] });
+  sh.title("Assumptions 假设参数");
+  sh.blank();
+  sh.header(["参数 Parameter", "Value"].concat((function () { var h = []; for (var i = 1; i <= n; i++) h.push("Year " + i); return h; })()));
+  sh.section("交易假设 Transaction Assumptions");
+  sh.row("LTM Revenue 最近12个月收入", [p.ltm_revenue], { fmt: F.num, numKind: "input" });
+  sh.row("LTM EBITDA 最近12个月EBITDA", [p.ltm_ebitda], { fmt: F.num, numKind: "input" });
+  sh.row("Entry EV/EBITDA 入场倍数", [p.entry_ev_ebitda], { fmt: F.mult, numKind: "input" });
+  sh.row("Entry EV 入场企业价值", ["=B6*B7"], { fmt: F.num });
+  sh.row("Existing Net Debt 现有净债务", [p.existing_net_debt], { fmt: F.num, numKind: "input" });
+  sh.row("Existing Cash 现有现金", [p.existing_cash], { fmt: F.num, numKind: "input" });
+  sh.row("Transaction Fees 交易费用", [p.transaction_fees], { fmt: F.num, numKind: "input" });
+  sh.row("Financing Fees 融资费用", [p.financing_fees], { fmt: F.num, numKind: "input" });
+  sh.section("资本结构 Capital Structure");
+  sh.row("Sponsor Equity 发起人股本", [p.sponsor_equity], { fmt: F.num, numKind: "input" });
+  sh.row("Revolver Capacity 循环额度上限", [p.revolver_capacity], { fmt: F.num, numKind: "input" });
+  sh.row("Term Loan A", [p.term_loan_a], { fmt: F.num, numKind: "input" });
+  sh.row("Term Loan B", [p.term_loan_b], { fmt: F.num, numKind: "input" });
+  sh.row("Senior Notes 优先票据", [p.senior_notes], { fmt: F.num, numKind: "input" });
+  sh.row("Subordinated Debt 次级债务", [p.subordinated_debt], { fmt: F.num, numKind: "input" });
+  sh.section("利率 Interest Rates");
+  sh.row("Revolver Rate 循环额度利率", [p.revolver_rate], { fmt: F.pct, numKind: "input" });
+  sh.row("Term Loan A Rate", [p.tla_rate], { fmt: F.pct, numKind: "input" });
+  sh.row("Term Loan B Rate", [p.tlb_rate], { fmt: F.pct, numKind: "input" });
+  sh.row("Senior Notes Rate", [p.senior_notes_rate], { fmt: F.pct, numKind: "input" });
+  sh.row("Subordinated Rate 次级债务利率", [p.sub_rate], { fmt: F.pct, numKind: "input" });
+  sh.section("偿债 Debt Repayment");
+  sh.row("TLA Mandatory Amort % TLA强制摊销率", [p.tla_mandatory_amort], { fmt: F.pct, numKind: "input" });
+  sh.row("TLB Mandatory Amort % TLB强制摊销率", [p.tlb_mandatory_amort], { fmt: F.pct, numKind: "input" });
+  sh.row("Cash Sweep % 现金清偿比例", [p.cash_sweep_pct], { fmt: F.pct, numKind: "input" });
+  sh.row("Min Cash Balance 最低现金余额", [p.min_cash_balance], { fmt: F.num, numKind: "input" });
+  sh.section("运营假设 Operating Assumptions");
+  sh.row("Revenue Growth % 收入增长率（每年可不同）", xlYearlyVals(p, "rev_growth", n), { fmt: F.pct, numKind: "input" });
+  sh.row("EBITDA Margin % EBITDA利润率", mgR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("D&A % of Revenue 折旧摊销率", daR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("CapEx % of Revenue 资本支出率", cxR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row("ΔNWC % of Revenue 净营运资本率", nwR.vals, { fmt: F.pct, numKind: "input" });
+  sh.row(xlTaxLabel(p), [p.tax_rate], { fmt: F.pct, numKind: "input" });
+  sh.section("退出 Exit");
+  sh.row("Exit EV/EBITDA 退出倍数", [p.exit_ev_ebitda], { fmt: F.mult, numKind: "input" });
+  sh.row("Exit Year 退出年（=预测年数）", [p.exit_year], { fmt: F.int, numKind: "input" });
+  sh.row("Cash Interest Rate 现金存款利率", [p.cash_interest_rate], { fmt: F.pct, numKind: "input" });
 
-  // Debt Schedule
-  var dsAoa = [];
-  dsAoa[0] = ["Debt Schedule 债务滚动表"];
-  dsAoa[2] = ["项目 Item", "Close"]; for (var i = 1; i <= n; i++) dsAoa[2].push("Year " + i);
-  dsAoa[3] = ["现金与偿债可用 Cash & CFADS"];
-  function dsRow(r, fn) { dsAoa[r-1] = []; dsAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) dsAoa[r-1][1+yi] = fn(yi, "val"); }
-  dsRow(5, function(yi, typ) { if (typ === "label") return "Beginning Cash 期初现金"; if (yi === 0) return "=" + A + "!B10"; return "=" + ycol(yi-1) + "35"; });
-  dsRow(6, function(yi, typ) { if (typ === "label") return "CFADS 偿债可用现金流"; if (yi === 0) return "=0"; return "=" + CF + "!" + ycol(yi) + "13"; });
-  dsRow(7, function(yi, typ) { if (typ === "label") return "Min Cash 最低现金"; return "=" + A + "!$B$30"; });
-  dsRow(8, function(yi, typ) { if (typ === "label") return "Cash Available 可用现金"; return "=MAX(0," + ycol(yi) + "5+" + ycol(yi) + "6-" + ycol(yi) + "7)"; });
-  dsAoa[9] = ["Revolver 循环额度"];
-  dsRow(11, function(yi, typ) { if (typ === "label") return "Beginning 期初"; if (yi === 0) return "=" + SU + "!B14"; return "=" + ycol(yi-1) + "13"; });
-  dsRow(12, function(yi, typ) { if (typ === "label") return "Repayment 偿还"; return "=MIN(" + ycol(yi) + "11," + ycol(yi) + "8)"; });
-  dsRow(13, function(yi, typ) { if (typ === "label") return "Ending 期末"; return "=" + ycol(yi) + "11-" + ycol(yi) + "12"; });
-  dsAoa[14] = ["Term Loan A"];
-  dsRow(16, function(yi, typ) { if (typ === "label") return "Beginning 期初"; if (yi === 0) return "=" + A + "!B16"; return "=" + ycol(yi-1) + "18"; });
-  dsRow(17, function(yi, typ) { if (typ === "label") return "Mandatory Amort 强制摊销"; return "=MIN(" + ycol(yi) + "16," + A + "!$B$16*" + A + "!$B$27)"; });
-  dsRow(18, function(yi, typ) { if (typ === "label") return "Ending 期末"; return "=" + ycol(yi) + "16-" + ycol(yi) + "17"; });
-  dsAoa[19] = ["Term Loan B"];
-  dsRow(21, function(yi, typ) { if (typ === "label") return "Beginning 期初"; if (yi === 0) return "=" + A + "!B17"; return "=" + ycol(yi-1) + "24"; });
-  dsRow(22, function(yi, typ) { if (typ === "label") return "Mandatory Amort 强制摊销"; return "=MIN(" + ycol(yi) + "21," + A + "!$B$17*" + A + "!$B$28)"; });
-  dsRow(23, function(yi, typ) { if (typ === "label") return "Cash Sweep 现金清偿"; return "=MIN(" + ycol(yi) + "21-" + ycol(yi) + "22,MAX(0," + ycol(yi) + "8-" + ycol(yi) + "12-" + ycol(yi) + "17-" + ycol(yi) + "22)*" + A + "!$B$29)"; });
-  dsRow(24, function(yi, typ) { if (typ === "label") return "Ending 期末"; return "=" + ycol(yi) + "21-" + ycol(yi) + "22-" + ycol(yi) + "23"; });
-  dsAoa[25] = ["Senior Notes 次优先票据"];
-  dsRow(27, function(yi, typ) { if (typ === "label") return "Beginning 期初"; if (yi === 0) return "=" + A + "!B18"; return "=" + ycol(yi-1) + "28"; });
-  dsRow(28, function(yi, typ) { if (typ === "label") return "Ending 期末"; return "=" + ycol(yi) + "27"; });
-  dsAoa[29] = ["Subordinated Debt 次级债务"];
-  dsRow(31, function(yi, typ) { if (typ === "label") return "Beginning 期初"; if (yi === 0) return "=" + A + "!B19"; return "=" + ycol(yi-1) + "32"; });
-  dsRow(32, function(yi, typ) { if (typ === "label") return "Ending 期末"; return "=" + ycol(yi) + "31"; });
-  dsRow(34, function(yi, typ) { if (typ === "label") return "Total Debt 总债务"; return "=" + ycol(yi) + "13+" + ycol(yi) + "18+" + ycol(yi) + "24+" + ycol(yi) + "28+" + ycol(yi) + "32"; });
-  dsRow(35, function(yi, typ) { if (typ === "label") return "Cash Ending 期末现金"; return "=MAX(" + ycol(yi) + "7," + ycol(yi) + "5+" + ycol(yi) + "6-" + ycol(yi) + "12-" + ycol(yi) + "17-" + ycol(yi) + "22-" + ycol(yi) + "23)"; });
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(dsAoa), "Debt Schedule");
+  // ---------------- Sources & Uses ----------------
+  var su = xlSheet(wb, "Sources & Uses", 2, { widths: [46, 18], freeze: [0, 3] });
+  su.title("Sources & Uses 资金来源与用途");
+  su.blank();
+  su.header(["项目 Item", "Amount"]);
+  su.section("Uses 用途");
+  su.blank();
+  su.row("Purchase of Equity 购买股权", ["=" + A + "!B8-" + A + "!B9"], { fmt: F.num });
+  su.row("Refinance Existing Debt 再融资债务", ["=" + A + "!B9+" + A + "!B10"], { fmt: F.num });
+  su.row("Transaction Fees 交易费用", ["=" + A + "!B11"], { fmt: F.num });
+  su.row("Financing Fees 融资费用", ["=" + A + "!B12"], { fmt: F.num });
+  su.row("Total Uses 用途合计", ["=SUM(B6:B9)"], { fmt: F.num, total: true });
+  su.blank();
+  su.section("Sources 来源");
+  su.row("Sponsor Equity 发起人股本", ["=" + A + "!B14"], { fmt: F.num });
+  su.row("Revolver Draw (plug) 循环额度提取", ["=B10-B13-B15-B16-B17-B18-B19"], { fmt: F.num });
+  su.row("Term Loan A", ["=" + A + "!B16"], { fmt: F.num });
+  su.row("Term Loan B", ["=" + A + "!B17"], { fmt: F.num });
+  su.row("Senior Notes 优先票据", ["=" + A + "!B18"], { fmt: F.num });
+  su.row("Subordinated Debt 次级债务", ["=" + A + "!B19"], { fmt: F.num });
+  su.row("Existing Cash 现有现金", ["=" + A + "!B10"], { fmt: F.num });
+  su.row("Total Sources 来源合计", ["=SUM(B13:B19)"], { fmt: F.num, total: true });
+  su.blank();
+  su.row("平衡校验 Balance Check", ['=IF(ROUND(B20-B10,2)=0,"BALANCED","IMBALANCED")'], {});
 
-  // Income Statement
-  var isAoa = [];
-  isAoa[0] = ["Income Statement 利润表"];
-  isAoa[2] = ["项目 Item", "LTM"]; for (var i = 1; i <= n; i++) isAoa[2].push("Year " + i);
-  function isRow(r, fn) { isAoa[r-1] = []; isAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) isAoa[r-1][1+yi] = fn(yi, "val"); }
-  isRow(5, function(yi, typ) { if (typ === "label") return "Revenue 营业收入"; if (yi === 0) return "=" + A + "!B5"; return "=" + ycol(yi-1) + "5*(1+" + A + "!" + ycol(yi) + "32)"; });
-  isRow(6, function(yi, typ) { if (typ === "label") return "Revenue Growth %"; if (yi === 0) return null; return "=" + ycol(yi) + "5/" + ycol(yi-1) + "5-1"; });
-  isRow(7, function(yi, typ) { if (typ === "label") return "EBITDA"; if (yi === 0) return "=" + A + "!B6"; return "=" + ycol(yi) + "5*" + A + "!" + ycol(yi) + "33"; });
-  isRow(8, function(yi, typ) { if (typ === "label") return "EBITDA Margin %"; if (yi === 0) return null; return "=" + ycol(yi) + "7/" + ycol(yi) + "5"; });
-  isRow(9, function(yi, typ) { if (typ === "label") return "D&A 折旧摊销"; return "=" + ycol(yi) + "5*" + A + "!$B$34"; });
-  isRow(10, function(yi, typ) { if (typ === "label") return "EBIT 营业利润"; return "=" + ycol(yi) + "7-" + ycol(yi) + "9"; });
-  isRow(12, function(yi, typ) { if (typ === "label") return "Interest - Revolver 利息(循环)"; return "=" + A + "!$B$21*" + DS + "!" + ycol(yi) + "11"; });
-  isRow(13, function(yi, typ) { if (typ === "label") return "Interest - TL A 利息(TLA)"; return "=" + A + "!$B$22*" + DS + "!" + ycol(yi) + "16"; });
-  isRow(14, function(yi, typ) { if (typ === "label") return "Interest - TL B 利息(TLB)"; return "=" + A + "!$B$23*" + DS + "!" + ycol(yi) + "21"; });
-  isRow(15, function(yi, typ) { if (typ === "label") return "Interest - Sr Notes 利息(优先票据)"; return "=" + A + "!$B$24*" + DS + "!" + ycol(yi) + "27"; });
-  isRow(16, function(yi, typ) { if (typ === "label") return "Interest - Sub 利息(次级)"; return "=" + A + "!$B$25*" + DS + "!" + ycol(yi) + "31"; });
-  isRow(17, function(yi, typ) { if (typ === "label") return "Total Interest 利息合计"; return "=SUM(" + ycol(yi) + "12:" + ycol(yi) + "16)"; });
-  isRow(18, function(yi, typ) { if (typ === "label") return "Interest Income 利息收入"; return "=" + A + "!$B$41*" + DS + "!" + ycol(yi) + "5"; });
-  isRow(19, function(yi, typ) { if (typ === "label") return "EBT 税前利润"; return "=" + ycol(yi) + "10-" + ycol(yi) + "17+" + ycol(yi) + "18"; });
-  isRow(20, function(yi, typ) { if (typ === "label") return "Taxes 所得税"; return "=MAX(0," + ycol(yi) + "19*" + A + "!$B$37)"; });
-  isRow(21, function(yi, typ) { if (typ === "label") return "Net Income 净利润"; return "=" + ycol(yi) + "19-" + ycol(yi) + "20"; });
+  // ---------------- Debt Schedule ----------------
+  var sd = xlSheet(wb, "Debt Schedule", NC, { widths: wA, freeze: [1, 3] });
+  sd.title("Debt Schedule 债务滚动表");
+  sd.blank();
+  sd.header(yHeadL("Close"));
+  sd.section("现金与偿债可用 Cash & CFADS");
+  sd.row("Beginning Cash 期初现金", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B10";
+    return "=" + ycol(yi - 1) + "35";
+  }), { fmt: F.num });
+  sd.row("CFADS 偿债可用现金流", yvals(function (yi) {
+    if (yi === 0) return "=0";
+    return "=" + CF + "!" + ycol(yi) + "13";
+  }), { fmt: F.num });
+  sd.row("Min Cash 最低现金", yvals(function () { return "=" + A + "!$B$30"; }), { fmt: F.num });
+  sd.row("Cash Available 可用现金", yvals(function (yi) {
+    return "=MAX(0," + ycol(yi) + "5+" + ycol(yi) + "6-" + ycol(yi) + "7)";
+  }), { fmt: F.num, total: true });
+  sd.section("Revolver 循环额度");
+  sd.blank();
+  sd.row("Beginning 期初", yvals(function (yi) {
+    if (yi === 0) return "=" + SU + "!B14";
+    return "=" + ycol(yi - 1) + "13";
+  }), { fmt: F.num });
+  sd.row("Repayment 偿还", yvals(function (yi) {
+    return "=MIN(" + ycol(yi) + "11," + ycol(yi) + "8)";
+  }), { fmt: F.num });
+  sd.row("Ending 期末", yvals(function (yi) {
+    return "=" + ycol(yi) + "11-" + ycol(yi) + "12";
+  }), { fmt: F.num, total: true });
+  sd.section("Term Loan A");
+  sd.blank();
+  sd.row("Beginning 期初", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B16";
+    return "=" + ycol(yi - 1) + "18";
+  }), { fmt: F.num });
+  sd.row("Mandatory Amort 强制摊销", yvals(function (yi) {
+    return "=MIN(" + ycol(yi) + "16," + A + "!$B$16*" + A + "!$B$27)";
+  }), { fmt: F.num });
+  sd.row("Ending 期末", yvals(function (yi) {
+    return "=" + ycol(yi) + "16-" + ycol(yi) + "17";
+  }), { fmt: F.num, total: true });
+  sd.section("Term Loan B");
+  sd.blank();
+  sd.row("Beginning 期初", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B17";
+    return "=" + ycol(yi - 1) + "24";
+  }), { fmt: F.num });
+  sd.row("Mandatory Amort 强制摊销", yvals(function (yi) {
+    return "=MIN(" + ycol(yi) + "21," + A + "!$B$17*" + A + "!$B$28)";
+  }), { fmt: F.num });
+  sd.row("Cash Sweep 现金清偿", yvals(function (yi) {
+    return "=MIN(" + ycol(yi) + "21-" + ycol(yi) + "22,MAX(0," + ycol(yi) + "8-" + ycol(yi) + "12-" + ycol(yi) + "17-" + ycol(yi) + "22)*" + A + "!$B$29)";
+  }), { fmt: F.num });
+  sd.row("Ending 期末", yvals(function (yi) {
+    return "=" + ycol(yi) + "21-" + ycol(yi) + "22-" + ycol(yi) + "23";
+  }), { fmt: F.num, total: true });
+  sd.section("Senior Notes 优先票据");
+  sd.blank();
+  sd.row("Beginning 期初", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B18";
+    return "=" + ycol(yi - 1) + "28";
+  }), { fmt: F.num });
+  sd.row("Ending 期末", yvals(function (yi) { return "=" + ycol(yi) + "27"; }), { fmt: F.num, total: true });
+  sd.section("Subordinated Debt 次级债务");
+  sd.blank();
+  sd.row("Beginning 期初", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B19";
+    return "=" + ycol(yi - 1) + "32";
+  }), { fmt: F.num });
+  sd.row("Ending 期末", yvals(function (yi) { return "=" + ycol(yi) + "31"; }), { fmt: F.num, total: true });
+  sd.blank();
+  sd.row("Total Debt 总债务", yvals(function (yi) {
+    return "=" + ycol(yi) + "13+" + ycol(yi) + "18+" + ycol(yi) + "24+" + ycol(yi) + "28+" + ycol(yi) + "32";
+  }), { fmt: F.num, total: true });
+  sd.row("Cash Ending 期末现金", yvals(function (yi) {
+    return "=MAX(" + ycol(yi) + "7," + ycol(yi) + "5+" + ycol(yi) + "6-" + ycol(yi) + "12-" + ycol(yi) + "17-" + ycol(yi) + "22-" + ycol(yi) + "23)";
+  }), { fmt: F.num, total: true });
+
+  // ---------------- Income Statement ----------------
+  var si = xlSheet(wb, "Income Statement", NC, { widths: wA, freeze: [1, 3] });
+  si.title("Income Statement 利润表");
+  si.blank();
+  si.header(yHeadL("LTM"));
+  si.section("利润表主体 Profit & Loss");
+  si.row("Revenue 营业收入", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B5";
+    return "=" + ycol(yi - 1) + "5*(1+" + A + "!" + ycol(yi) + "32)";
+  }), { fmt: F.num });
+  si.row("Revenue Growth % 增长率", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "5/" + ycol(yi - 1) + "5-1";
+  }), { fmt: F.pct });
+  si.row("EBITDA", yvals(function (yi) {
+    if (yi === 0) return "=" + A + "!B6";
+    return "=" + ycol(yi) + "5*" + aRef(A, mgR.per, 33, yi);
+  }), { fmt: F.num, total: true });
+  si.row("EBITDA Margin %", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "7/" + ycol(yi) + "5";
+  }), { fmt: F.pct });
+  si.row("D&A 折旧摊销", yvals(function (yi) { return "=" + ycol(yi) + "5*" + aRef(A, daR.per, 34, yi); }), { fmt: F.num });
+  si.row("EBIT 营业利润", yvals(function (yi) { return "=" + ycol(yi) + "7-" + ycol(yi) + "9"; }), { fmt: F.num, total: true });
+  si.blank();
+  si.row("Interest - Revolver 利息(循环)", yvals(function (yi) {
+    return "=" + A + "!$B$21*" + DS + "!" + ycol(yi) + "11";
+  }), { fmt: F.num });
+  si.row("Interest - TL A 利息(TLA)", yvals(function (yi) {
+    return "=" + A + "!$B$22*" + DS + "!" + ycol(yi) + "16";
+  }), { fmt: F.num });
+  si.row("Interest - TL B 利息(TLB)", yvals(function (yi) {
+    return "=" + A + "!$B$23*" + DS + "!" + ycol(yi) + "21";
+  }), { fmt: F.num });
+  si.row("Interest - Sr Notes 利息(优先票据)", yvals(function (yi) {
+    return "=" + A + "!$B$24*" + DS + "!" + ycol(yi) + "27";
+  }), { fmt: F.num });
+  si.row("Interest - Sub 利息(次级)", yvals(function (yi) {
+    return "=" + A + "!$B$25*" + DS + "!" + ycol(yi) + "31";
+  }), { fmt: F.num });
+  si.row("Total Interest 利息合计", yvals(function (yi) {
+    return "=SUM(" + ycol(yi) + "12:" + ycol(yi) + "16)";
+  }), { fmt: F.num, total: true });
+  si.row("Interest Income 利息收入", yvals(function (yi) {
+    return "=" + A + "!$B$41*" + DS + "!" + ycol(yi) + "5";
+  }), { fmt: F.num });
+  si.row("EBT 税前利润", yvals(function (yi) {
+    return "=" + ycol(yi) + "10-" + ycol(yi) + "17+" + ycol(yi) + "18";
+  }), { fmt: F.num, total: true });
+  si.row("Taxes 所得税", yvals(function (yi) {
+    return "=MAX(0," + ycol(yi) + "19*" + A + "!$B$37)";
+  }), { fmt: F.num });
+  si.row("Net Income 净利润", yvals(function (yi) {
+    return "=" + ycol(yi) + "19-" + ycol(yi) + "20";
+  }), { fmt: F.num, total: true });
 
   if (p.custom_items && p.custom_items.length) {
-    isAoa[22] = ["自定义行项 Custom Line Items"];
+    si.section("自定义行项 Custom Line Items");
+    si.blank();
     function buildIsCellMap(col) {
       return {
-        revenue: col+"5", ebitda: col+"7", da: col+"9", ebit: col+"10",
-        interest_revolver: col+"12", interest_tla: col+"13", interest_tlb: col+"14",
-        interest_sn: col+"15", interest_sub: col+"16", total_interest: col+"17",
-        interest_income: col+"18", ebt: col+"19", taxes: col+"20", net_income: col+"21",
-        total_debt: DS+"!"+col+"34", cash: DS+"!"+col+"35", revolver: DS+"!"+col+"13",
-        tla: DS+"!"+col+"18", tlb: DS+"!"+col+"24", senior_notes: DS+"!"+col+"28",
-        subordinated_debt: DS+"!"+col+"32", cfads: CF+"!"+col+"13",
+        revenue: col + "5", ebitda: col + "7", da: col + "9", ebit: col + "10",
+        interest_revolver: col + "12", interest_tla: col + "13", interest_tlb: col + "14",
+        interest_sn: col + "15", interest_sub: col + "16", total_interest: col + "17",
+        interest_income: col + "18", ebt: col + "19", taxes: col + "20", net_income: col + "21",
+        total_debt: DS + "!" + col + "34", cash: DS + "!" + col + "35", revolver: DS + "!" + col + "13",
+        tla: DS + "!" + col + "18", tlb: DS + "!" + col + "24", senior_notes: DS + "!" + col + "28",
+        subordinated_debt: DS + "!" + col + "32", cfads: CF + "!" + col + "13"
       };
     }
     for (var idx = 0; idx < p.custom_items.length; idx++) {
-      var ci = p.custom_items[idx]; var r = 24 + idx;
-      isAoa[r-1] = [ci.name];
-      for (var yi = 0; yi <= n; yi++) {
-        var col = ycol(yi); var cm = buildIsCellMap(col);
-        try { isAoa[r-1][1+yi] = expressionToExcel(ci.formula, cm); } catch(e) { isAoa[r-1][1+yi] = '="#ERR: ' + String(e.message || e).substring(0,30) + '"'; }
-      }
+      var ci = p.custom_items[idx];
+      var civals = yvals(function (yi) {
+        var col = ycol(yi);
+        try { return expressionToExcel(ci.formula, buildIsCellMap(col)); }
+        catch (e) { return '="#ERR: ' + String(e.message || e).substring(0, 30) + '"'; }
+      });
+      si.row(ci.name, civals, { fmt: F.num });
     }
   }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(isAoa), "Income Statement");
 
-  // Cash Flow (CFADS)
-  var cfAoa = [];
-  cfAoa[0] = ["Cash Flow (CFADS) 偿债可用现金流"];
-  cfAoa[2] = ["项目 Item", "LTM"]; for (var i = 1; i <= n; i++) cfAoa[2].push("Year " + i);
-  function cfRow(r, fn) { cfAoa[r-1] = []; cfAoa[r-1][0] = fn(0, "label"); for (var yi = 0; yi <= n; yi++) cfAoa[r-1][1+yi] = fn(yi, "val"); }
-  cfRow(5, function(yi, typ) { if (typ === "label") return "Net Income 净利润"; if (yi === 0) return null; return "=" + IS + "!" + ycol(yi) + "21"; });
-  cfRow(7, function(yi, typ) { if (typ === "label") return "D&A 折旧摊销"; if (yi === 0) return null; return "=" + IS + "!" + ycol(yi) + "9"; });
-  cfRow(8, function(yi, typ) { if (typ === "label") return "Δ NWC 净营运资本变动"; if (yi === 0) return null; return "=-" + IS + "!" + ycol(yi) + "5*" + A + "!$B$36"; });
-  cfRow(9, function(yi, typ) { if (typ === "label") return "Cash from Operations 经营现金流"; if (yi === 0) return null; return "=" + ycol(yi) + "5+" + ycol(yi) + "7+" + ycol(yi) + "8"; });
-  cfRow(11, function(yi, typ) { if (typ === "label") return "CapEx 资本支出"; if (yi === 0) return null; return "=-" + IS + "!" + ycol(yi) + "5*" + A + "!$B$35"; });
-  cfRow(13, function(yi, typ) { if (typ === "label") return "CFADS 偿债可用现金流"; if (yi === 0) return null; return "=" + ycol(yi) + "9+" + ycol(yi) + "11"; });
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(cfAoa), "Cash Flow (CFADS)");
+  // ---------------- Cash Flow (CFADS) ----------------
+  var sc = xlSheet(wb, "Cash Flow (CFADS)", NC, { widths: wA, freeze: [1, 3] });
+  sc.title("Cash Flow (CFADS) 偿债可用现金流");
+  sc.blank();
+  sc.header(yHeadL("LTM"));
+  sc.blank();
+  sc.row("Net Income 净利润", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + IS + "!" + ycol(yi) + "21";
+  }), { fmt: F.num });
+  sc.blank();
+  sc.row("D&A 折旧摊销", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + IS + "!" + ycol(yi) + "9";
+  }), { fmt: F.num });
+  sc.row("Δ NWC 净营运资本变动", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=-" + IS + "!" + ycol(yi) + "5*" + aRef(A, nwR.per, 36, yi);
+  }), { fmt: F.num });
+  sc.row("Cash from Operations 经营现金流", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "5+" + ycol(yi) + "7+" + ycol(yi) + "8";
+  }), { fmt: F.num, total: true });
+  sc.blank();
+  sc.row("CapEx 资本支出", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=-" + IS + "!" + ycol(yi) + "5*" + aRef(A, cxR.per, 35, yi);
+  }), { fmt: F.num });
+  sc.blank();
+  sc.row("CFADS 偿债可用现金流", yvals(function (yi) {
+    if (yi === 0) return null;
+    return "=" + ycol(yi) + "9+" + ycol(yi) + "11";
+  }), { fmt: F.num, total: true });
 
-  // Exit & Returns
-  var exitCol = ycol(p.exit_year);
-  var erAoa = [];
-  erAoa[0] = ["Exit & Returns 退出与回报"];
-  erAoa[2] = ["项目 Item", "Value"];
-  erAoa[4] = ["Exit Year (" + p.exit_year + ") EBITDA 退出年EBITDA", "=" + IS + "!" + exitCol + "7"];
-  erAoa[5] = ["Exit EV/EBITDA 退出倍数", "=" + A + "!B39"];
-  erAoa[6] = ["Exit Enterprise Value 退出企业价值", "=B5*B6"];
-  erAoa[7] = ["Less: Total Debt 减:总债务", "=-" + DS + "!" + exitCol + "34"];
-  erAoa[8] = ["Plus: Cash 加:现金", "=" + DS + "!" + exitCol + "35"];
-  erAoa[9] = ["Equity Value at Exit 退出股权价值", "=B7+B8+B9"];
-  erAoa[11] = ["Sponsor Equity Invested 投入股本", "=" + A + "!B14"];
-  erAoa[12] = ["MoIC (x) 投资倍数", "=B10/B12"];
-  erAoa[14] = ["现金流时间轴 Cash Flow Timeline"];
-  for (var yi = 0; yi < 6; yi++) erAoa[14][1+yi] = yi > 0 ? "Year " + yi : "Year 0";
-  erAoa[15] = ["Sponsor Cash Flows"];
-  for (var yi = 0; yi < 6; yi++) {
-    if (yi === 0) erAoa[15][1+yi] = "=-" + A + "!B14";
-    else if (yi === p.exit_year) erAoa[15][1+yi] = "=B10";
-    else if (yi < p.exit_year) erAoa[15][1+yi] = "=0";
+  // ---------------- Exit & Returns ----------------
+  var exitCol = ycol(n);
+  var er = xlSheet(wb, "Exit & Returns", NC, { widths: wA, freeze: [1, 3] });
+  er.title("Exit & Returns 退出与回报");
+  er.blank();
+  er.header(["项目 Item", "Value"]);
+  er.blank();
+  er.row("Exit Year (" + n + ") EBITDA 退出年EBITDA", ["=" + IS + "!" + exitCol + "7"], { fmt: F.num });
+  er.row("Exit EV/EBITDA 退出倍数", ["=" + A + "!B39"], { fmt: F.mult });
+  er.row("Exit Enterprise Value 退出企业价值", ["=B5*B6"], { fmt: F.num, total: true });
+  er.row("Less: Total Debt 减:总债务", ["=-" + DS + "!" + exitCol + "34"], { fmt: F.num });
+  er.row("Plus: Cash 加:现金", ["=" + DS + "!" + exitCol + "35"], { fmt: F.num });
+  er.row("Equity Value at Exit 退出股权价值", ["=B7+B8+B9"], { fmt: F.num, total: true });
+  er.blank();
+  er.row("Sponsor Equity Invested 投入股本", ["=" + A + "!B14"], { fmt: F.num });
+  er.row("MoIC (x) 投资倍数", ["=B10/B12"], { fmt: F.mult, total: true });
+  er.blank();
+  er.section("现金流时间轴 Cash Flow Timeline");
+  var tl = [null, "Year 0"]; for (var ti = 1; ti <= n; ti++) tl.push("Year " + ti);
+  er.header(tl);
+  var cfRowVals = [];
+  for (var yi = 0; yi <= n; yi++) {
+    if (yi === 0) cfRowVals.push("=-" + A + "!B14");
+    else if (yi === n) cfRowVals.push("=B10");
+    else cfRowVals.push("=0");
   }
-  erAoa[17] = ["IRR 内部收益率", "=IRR(B16:" + exitCol + "16)"];
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(erAoa), "Exit & Returns");
+  er.row("Sponsor Cash Flows 发起人现金流", cfRowVals, { fmt: F.num });
+  er.row("IRR 内部收益率", ["=IRR(B17:" + ycol(n) + "17)"], { fmt: F.pct, total: true });
+  er.note("退出年 = Assumptions 中的 Exit Year（预测年数）。时间轴：Year 0 投入 Sponsor Equity（负值），退出年收回股权价值（Equity Value at Exit），其间无分红则为 0。IRR 由 Excel IRR 函数对该行现金流计算；MoIC = 退出股权价值 / 投入股本。", 56);
 
-  // Sensitivity
-  var entryMults = [p.entry_ev_ebitda-1, p.entry_ev_ebitda-0.5, p.entry_ev_ebitda, p.entry_ev_ebitda+0.5, p.entry_ev_ebitda+1];
-  var exitMults = [p.exit_ev_ebitda-1, p.exit_ev_ebitda-0.5, p.exit_ev_ebitda, p.exit_ev_ebitda+0.5, p.exit_ev_ebitda+1];
-  var lboSAoa = [];
-  lboSAoa[0] = ["Sensitivity 敏感性分析"];
-  lboSAoa[1] = ["行=入场倍数，列=退出倍数；单元格=MoIC"];
-  lboSAoa[3] = ["Entry \\ Exit"];
-  for (var j = 0; j < exitMults.length; j++) lboSAoa[3][1+j] = exitMults[j];
-  for (var i = 0; i < entryMults.length; i++) {
-    lboSAoa[4+i] = [entryMults[i]];
-    for (var j = 0; j < exitMults.length; j++) {
-      var entryEquity = "(" + A + "!$B$6*" + entryMults[i] + "-" + A + "!$B$9+" + A + "!$B$10)";
-      var exitEv = IS + "!" + exitCol + "7*" + exitMults[j];
+  // ---------------- Sensitivity ----------------
+  var entryMults = [p.entry_ev_ebitda - 1, p.entry_ev_ebitda - 0.5, p.entry_ev_ebitda, p.entry_ev_ebitda + 0.5, p.entry_ev_ebitda + 1];
+  var exitMults = [p.exit_ev_ebitda - 1, p.exit_ev_ebitda - 0.5, p.exit_ev_ebitda, p.exit_ev_ebitda + 0.5, p.exit_ev_ebitda + 1];
+  var s2 = xlSheet(wb, "Sensitivity", 6, { widths: [18, 13, 13, 13, 13, 13] });
+  s2.title("Sensitivity 敏感性分析");
+  s2.note("行=入场倍数，列=退出倍数；单元格=MoIC（退出股权价值/入场股权）。", 28);
+  s2.blank();
+  s2.header(["Entry \\ Exit"].concat(exitMults));
+  for (var hc2 = 2; hc2 <= 6; hc2++) s2.ws.getCell(4, hc2).numFmt = F.mult;
+  for (var ei = 0; ei < entryMults.length; ei++) {
+    var rv = [];
+    for (var ej = 0; ej < exitMults.length; ej++) {
+      var entryEquity = "(" + A + "!$B$6*" + entryMults[ei] + "-" + A + "!$B$9+" + A + "!$B$10)";
+      var exitEv = IS + "!" + exitCol + "7*" + exitMults[ej];
       var exitEquity = "(" + exitEv + "-" + DS + "!" + exitCol + "34+" + DS + "!" + exitCol + "35)";
-      lboSAoa[4+i][1+j] = "=(" + exitEquity + ")/(" + entryEquity + ")";
+      rv.push({ v: "=(" + exitEquity + ")/(" + entryEquity + ")", f: F.mult });
     }
+    s2.row(entryMults[ei], rv, { fmt: F.mult, numKind: "input" });
   }
-  XLSX.utils.book_append_sheet(wb, aoaToSheet(lboSAoa), "Sensitivity");
 }
 
 
